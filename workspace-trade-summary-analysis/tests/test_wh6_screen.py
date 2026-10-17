@@ -1,5 +1,4 @@
 import importlib.util
-import json
 from pathlib import Path
 import unittest
 
@@ -18,6 +17,11 @@ class WH6Tests(unittest.TestCase):
         self.assertEqual(result['ask1'], 4903)
         self.assertEqual(result['bid1'], 4902)
         self.assertEqual(result['last'], 4903)
+
+    def test_parse_spaced_contract(self):
+        result = wh6.parse_wh6_ocr('P V C 2 7 0 1 M 卖出 4903 买入 4902 最新 4903')
+        self.assertEqual(result['variety'], 'V')
+        self.assertEqual(result['contract'], 'PVC2701')
 
     def test_validate_configured_v_quote(self):
         result = wh6.validate_recognized_market(wh6.parse_wh6_ocr('PVC2701M 卖出 4903 买入 4902 最新 4903', .98), config)

@@ -41,10 +41,17 @@ def _normalize_contract(raw: str) -> tuple[str, str]:
 
 def parse_wh6_ocr(text: str, confidence: float | None = None) -> dict[str, Any]:
     """Parse WH6 right quote panel and return normalized, untrusted OCR data."""
+    # Normalize common OCR confusions from WH6's compact contract code.
+    text = re.sub(r"(?i)P\s*V\s*C", "PVC", text)
+    text = re.sub(r"(?i)\bV\s*2\s*7\s*0\s*1\b", "V2701", text)
     result = parse_ocr_text(text)
-    # WH6 top label often renders as `PVC2701M (DCE v2701)`; prefer the actual
-    # contract in the right quote panel if a second one is recognized.
-    contracts = re.findall(r"\b(?:PVC|V|JD|LH|RU|FG|MA|JM|C)\s*\d{3,4}M?\b", text, re.I)
+    # OCR frequently inserts spaces inside the contract (e.g. `PVC 2701 M`).
+    # Match prefixes and digits separately, then normalize the complete token.
+    contracts = re.findall(
+        r"(?<![A-Za-z])(?:PVC|V|JD|LH|RU|FG|MA|JM|C)\s*\d(?:[\s,.-]*\d){2,3}\s*M?\b",
+        text,
+        re.I,
+    )
     if contracts:
         # The first contract is typically chart tab/current contract.
         variety, contract = _normalize_contract(contracts[0])
@@ -139,34 +146,46 @@ def capture_windows_process(process_name: str = PROCESS_NAME, interval: float = 
 
 def ocr_image(image_path: Path, lang: str = "chi_sim+eng", region: tuple[int, int, int, int] | None = None) -> dict[str, Any]:
     try:
-        from PIL import Image, ImageOps, ImageEnhance  # type: ignore
+        from PIL import Image, ImageOps, ImageEnhance, ImageFilter  # type: ignore
         import pytesseract  # type: ignore
     except ImportError as exc:
         raise RuntimeError("Install Pillow and pytesseract, plus Tesseract OCR with chi_sim language data") from exc
     image = Image.open(image_path).convert("RGB")
     if region:
         image = image.crop(region)
-    # High-contrast WH6 quote panels have small colored text on black background.
+    # WH6 uses colored text on black. Run OCR over several high-contrast
+    # variants instead of assuming grayscale preserves the useful signal.
     gray = ImageOps.grayscale(image)
-    gray = ImageEnhance.Contrast(gray).enhance(2.0)
+    variants = [
+        ("gray", gray),
+        ("contrast", ImageEnhance.Contrast(gray).enhance(3.0)),
+        ("upscaled", ImageEnhance.Contrast(gray.resize((gray.width * 2, gray.height * 2))).enhance(3.0)),
+        ("red_channel", image.getchannel("R")),
+        ("green_channel", image.getchannel("G")),
+    ]
     attempts = []
-    for psm in (6, 11):
-        data = pytesseract.image_to_data(gray, lang=lang, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
-        words, confidences = [], []
-        for word, conf in zip(data["text"], data["conf"]):
-            word = word.strip()
-            try: score = float(conf)
-            except (TypeError, ValueError): score = -1
-            if word:
-                words.append(word)
-                if score >= 0: confidences.append(score / 100)
-        text = " ".join(words)
-        confidence = sum(confidences) / len(confidences) if confidences else 0.0
-        parsed = parse_wh6_ocr(text, confidence)
-        field_count = sum(parsed.get(key) is not None for key in ("variety", "bid1", "ask1", "last"))
-        attempts.append((field_count, confidence, psm, text, parsed))
-    field_count, confidence, psm, text, result = max(attempts, key=lambda item: (item[0], item[1]))
+    for variant_name, variant in variants:
+        variant = variant.filter(ImageFilter.SHARPEN)
+        for psm in (6, 11, 12):
+            data = pytesseract.image_to_data(variant, lang=lang, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
+            words, confidences = [], []
+            for word, conf in zip(data["text"], data["conf"]):
+                word = word.strip()
+                try: score = float(conf)
+                except (TypeError, ValueError): score = -1
+                if word:
+                    words.append(word)
+                    if score >= 0: confidences.append(score / 100)
+            text = " ".join(words)
+            confidence = sum(confidences) / len(confidences) if confidences else 0.0
+            parsed = parse_wh6_ocr(text, confidence)
+            field_count = sum(parsed.get(key) is not None for key in ("variety", "bid1", "ask1", "last"))
+            # Prefer actual fields over generic OCR confidence: random window
+            # text must not beat a weak but useful quote-panel read.
+            attempts.append((field_count, confidence, variant_name, psm, text, parsed))
+    field_count, confidence, variant_name, psm, text, result = max(attempts, key=lambda item: (item[0], item[1]))
     result["ocr_text"] = text
+    result["ocr_variant"] = variant_name
     result["ocr_psm"] = psm
     result["ocr_fields_found"] = field_count
     result["image_path"] = str(image_path)
@@ -209,6 +228,7 @@ def main() -> int:
     p.add_argument("--watch", action="store_true", help="repeat capture/OCR until Ctrl+C")
     p.add_argument("--region", help="crop x,y,width,height (relative to screenshot/window)")
     p.add_argument("--out", type=Path, help="append result JSON records here")
+    p.add_argument("--save-capture", type=Path, help="save the captured WH6 frame for OCR debugging")
     p.add_argument("--tesseract-cmd", help="path to tesseract.exe if not on PATH")
     p.add_argument("--lang", default="chi_sim+eng")
     p.add_argument("--config", type=Path)
@@ -237,10 +257,16 @@ def main() -> int:
                     # Save a temporary frame so OCR provenance hashes actual image bytes.
                     temp = Path.cwd() / ".wh6_capture_tmp.png"
                     image.save(temp)
+                    if args.save_capture:
+                        args.save_capture.parent.mkdir(parents=True, exist_ok=True)
+                        image.save(args.save_capture)
                     try:
                         parsed = ocr_image_best(temp, args.lang, region)
                     finally:
                         temp.unlink(missing_ok=True)
+                    if args.save_capture:
+                        parsed["image_path"] = str(args.save_capture)
+                        parsed["image_sha256"] = hashlib.sha256(args.save_capture.read_bytes()).hexdigest()
                     parsed["window_title"] = title
                     fallback = parsed
                     if parsed.get("variety"):

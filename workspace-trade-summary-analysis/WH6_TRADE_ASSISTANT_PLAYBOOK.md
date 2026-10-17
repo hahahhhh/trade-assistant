@@ -88,6 +88,7 @@ eng
 ```powershell
 python workspace-trade-summary-analysis\wh6_screen.py `
   --capture `
+  --save-capture C:\wh6_data\last_capture.png `
   --tesseract-cmd "C:\Program Files\Tesseract-OCR\tesseract.exe"
 ```
 
