@@ -23,6 +23,18 @@ class WH6Tests(unittest.TestCase):
         self.assertEqual(result['variety'], 'V')
         self.assertEqual(result['contract'], 'PVC2701')
 
+    def test_parse_spaced_quote_labels(self):
+        result = wh6.parse_wh6_ocr('PVC2701 v2701 卖 出 4903 买 入 4902 最 新 4903')
+        self.assertEqual(result['ask1'], 4903)
+        self.assertEqual(result['bid1'], 4902)
+        self.assertEqual(result['last'], 4903)
+
+    def test_quote_price_fallback(self):
+        result = wh6.parse_wh6_ocr('PVC2701 出 4903 EVN 4902 最 新 4903')
+        self.assertEqual(result['ask1'], 4903)
+        self.assertEqual(result['bid1'], 4902)
+        self.assertEqual(result['last'], 4903)
+
     def test_validate_configured_v_quote(self):
         result = wh6.validate_recognized_market(wh6.parse_wh6_ocr('PVC2701M 卖出 4903 买入 4902 最新 4903', .98), config)
         self.assertTrue(result['validation']['valid'])

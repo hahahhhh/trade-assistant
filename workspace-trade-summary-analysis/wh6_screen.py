@@ -44,6 +44,11 @@ def parse_wh6_ocr(text: str, confidence: float | None = None) -> dict[str, Any]:
     # Normalize common OCR confusions from WH6's compact contract code.
     text = re.sub(r"(?i)P\s*V\s*C", "PVC", text)
     text = re.sub(r"(?i)\bV\s*2\s*7\s*0\s*1\b", "V2701", text)
+    # Tesseract often separates Chinese glyphs or replaces 买入 with a
+    # Latin-looking token. Normalize only label-shaped fragments before prices.
+    text = re.sub(r"卖\s*[出一]", "卖出", text)
+    text = re.sub(r"买\s*[入一]", "买入", text)
+    text = re.sub(r"最\s*新", "最新", text)
     result: dict[str, Any] = {}
     # OCR frequently inserts spaces inside the contract (e.g. `PVC 2701 M`).
     # Match prefixes and digits separately, then normalize the complete token.
@@ -62,6 +67,20 @@ def parse_wh6_ocr(text: str, confidence: float | None = None) -> dict[str, Any]:
         match = re.search(label + r"\s*[:：]?\s*([0-9]{2,7}(?:\.[0-9]+)?)", text)
         if match and field not in result:
             result[field] = float(match.group(1))
+    # Fallback for WH6's fixed quote-panel order when Chinese labels are
+    # partially lost: after the contract, the first two 4-digit prices are
+    # ask1 and bid1, and the next value near 最新 is last. This is accepted
+    # only when the order-book relationship is plausible.
+    if not all(key in result for key in ("ask1", "bid1", "last")):
+        panel = text[text.find(result.get("contract", "")):] if result.get("contract") else text
+        prices = [float(value) for value in re.findall(r"\b(?:4[0-9]{3}|5[0-9]{3})\b", panel)]
+        if len(prices) >= 3:
+            for ask, bid, last in zip(prices, prices[1:], prices[2:]):
+                if bid <= ask and abs(last - ask) <= 20:
+                    result.setdefault("ask1", ask)
+                    result.setdefault("bid1", bid)
+                    result.setdefault("last", last)
+                    break
     # Quote panel secondary values are optional; capture only when label-based.
     for label, field in (("涨跌", "change_text"), ("开盘", "open"), ("最高", "high"), ("最低", "low"), ("昨收", "prev_close"), ("持仓", "open_interest"), ("总量", "volume")):
         match = re.search(label + r"\s*[:：]?\s*([+-]?[0-9,]+(?:\.[0-9]+)?%?)", text)
