@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "ocr_min_confidence": 0.85,
+  "global_limits": {
+    "daily_open_limit": 5,
+    "daily_loss_limit_rmb": 400,
+    "max_total_exposure_rmb": 600
+  },
+  "smc_tags": [
+    "FVG",
+    "OB",
+    "Sweep",
+    "Rejection",
+    "BOS",
+    "Break Retest",
+    "Liquidity",
+    "MSS/CHoCH",
+    "Other"
+  ],
+  "htf_bias_values": ["long", "short", "ranging", "unclear"],
+  "instruments": {
+    "V": {
+      "value_per_point": 5,
+      "min_tick": 1,
+      "value_per_tick": 5,
+      "single_trade_limit_rmb": 200,
+      "round_trip_cost_per_lot": 0,
+      "slippage_buffer_per_lot": 0,
+      "configured": true
+    },
+    "LH": {
+      "value_per_point": 16,
+      "min_tick": 5,
+      "value_per_tick": 80,
+      "single_trade_limit_rmb": 200,
+      "round_trip_cost_per_lot": 0,
+      "slippage_buffer_per_lot": 0,
+      "configured": true
+    },
+    "FG": {
+      "value_per_point": 20,
+      "min_tick": 1,
+      "value_per_tick": 20,
+      "single_trade_limit_rmb": 200,
+      "round_trip_cost_per_lot": 0,
+      "slippage_buffer_per_lot": 0,
+      "configured": true
+    },
+    "JD": {"configured": false},
+    "RU": {"configured": false},
+    "MA": {"configured": false},
+    "C": {"configured": false},
+    "JM": {"configured": false}
+  }
+}

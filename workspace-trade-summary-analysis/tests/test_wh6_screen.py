@@ -1,0 +1,48 @@
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('wh6_screen', ROOT / 'wh6_screen.py')
+wh6 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wh6)
+config = wh6.load_config()
+
+
+class WH6Tests(unittest.TestCase):
+    def test_parse_quote_panel(self):
+        result = wh6.parse_wh6_ocr('PVC2701M DCE 卖出 4903 5 买入 4902 27 最新 4903 涨跌 55/1.13% 开盘 4870 最高 4938 最低 4860')
+        self.assertEqual(result['variety'], 'V')
+        self.assertEqual(result['contract'], 'PVC2701')
+        self.assertEqual(result['ask1'], 4903)
+        self.assertEqual(result['bid1'], 4902)
+        self.assertEqual(result['last'], 4903)
+
+    def test_validate_configured_v_quote(self):
+        result = wh6.validate_recognized_market(wh6.parse_wh6_ocr('PVC2701M 卖出 4903 买入 4902 最新 4903', .98), config)
+        self.assertTrue(result['validation']['valid'])
+        self.assertFalse(result['validation']['errors'])
+
+    def test_unconfigured_recognized_variety_warns(self):
+        result = wh6.validate_recognized_market(wh6.parse_wh6_ocr('JD2701 卖出 3000 买入 2999 最新 3000', .98), config)
+        self.assertTrue(result['validation']['valid'])
+        self.assertTrue(result['validation']['warnings'])
+
+    def test_bad_order_book_fails(self):
+        result = wh6.validate_recognized_market(wh6.parse_wh6_ocr('PVC2701 卖出 4902 买入 4903 最新 4903', .98), config)
+        self.assertFalse(result['validation']['valid'])
+
+    def test_parse_failure_is_diagnostic(self):
+        result = wh6.parse_wh6_ocr('卖出 4903 买入 4902 最新 4903', .5)
+        self.assertNotIn('variety', result)
+        self.assertEqual(result['source'], 'wh6_ocr')
+        self.assertEqual(result['ocr_confidence'], .5)
+
+    def test_process_constants(self):
+        self.assertEqual(wh6.PROCESS_NAME, 'mytrader_spqh.exe')
+        self.assertEqual(wh6.APP_NAME, 'wh6')
+
+
+if __name__ == '__main__':
+    unittest.main()
