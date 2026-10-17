@@ -83,14 +83,17 @@ eng
 4. 确认右侧行情栏包含合约、卖出/买入、最新价。
 5. 先不要使用 `--watch`，先做单次识别。
 
-单次捕获并 OCR：
+单次捕获并 OCR。默认推荐 `monitor`，会捕获 WH6 所在显示器的完整画面；`window` 只捕获进程窗口本身：
 
 ```powershell
 python workspace-trade-summary-analysis\wh6_screen.py `
   --capture `
+  --capture-mode monitor `
   --save-capture C:\wh6_data\last_capture.png `
   --tesseract-cmd "C:\Program Files\Tesseract-OCR\tesseract.exe"
 ```
+
+你的屏幕为 1920×1080 时，`last_capture.png` 应接近 1920×1080。若仍只得到约 1156×249，说明实际运行的不是最新源码包，或使用了 `--capture-mode window`。
 
 预期输出是 JSON，至少应看到：
 

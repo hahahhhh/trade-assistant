@@ -16,14 +16,14 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from trade_assistant import load_config, parse_ocr_text
+    from trade_assistant import load_config
 except ModuleNotFoundError:  # direct file import from the test runner
     import importlib.util
     _spec = importlib.util.spec_from_file_location("trade_assistant", Path(__file__).with_name("trade_assistant.py"))
     _module = importlib.util.module_from_spec(_spec)
     assert _spec.loader is not None
     _spec.loader.exec_module(_module)
-    load_config, parse_ocr_text = _module.load_config, _module.parse_ocr_text
+    load_config = _module.load_config
 
 PROCESS_NAME = "mytrader_spqh.exe"
 APP_NAME = "wh6"
@@ -44,11 +44,11 @@ def parse_wh6_ocr(text: str, confidence: float | None = None) -> dict[str, Any]:
     # Normalize common OCR confusions from WH6's compact contract code.
     text = re.sub(r"(?i)P\s*V\s*C", "PVC", text)
     text = re.sub(r"(?i)\bV\s*2\s*7\s*0\s*1\b", "V2701", text)
-    result = parse_ocr_text(text)
+    result: dict[str, Any] = {}
     # OCR frequently inserts spaces inside the contract (e.g. `PVC 2701 M`).
     # Match prefixes and digits separately, then normalize the complete token.
     contracts = re.findall(
-        r"(?<![A-Za-z])(?:PVC|V|JD|LH|RU|FG|MA|JM|C)\s*\d(?:[\s,.-]*\d){2,3}\s*M?\b",
+        r"(?<![A-Za-z])(?:PVC|V|JD|LH|RU|FG|MA|JM|C)\s*\d(?:[\s,.-]*\d){3}\s*M?\b",
         text,
         re.I,
     )
@@ -79,29 +79,33 @@ def validate_recognized_market(data: dict[str, Any], config: dict[str, Any]) -> 
     variety = data.get("variety")
     if not variety:
         errors.append("Could not identify contract/variety")
-    else:
-        inst = config["instruments"].get(variety)
-        if not inst or not inst.get("configured", False):
+    if not data.get("contract"):
+        errors.append("Could not identify contract code")
+    for key in ("bid1", "ask1", "last"):
+        value = data.get(key)
+        if value is None:
+            errors.append(f"Missing recognized field {key}")
+    inst = config["instruments"].get(variety) if variety else None
+    if not inst or not inst.get("configured", False):
+        if variety:
             warnings.append(f"{variety} is recognized but its risk config is not enabled")
-        else:
-            tick = float(inst["min_tick"])
-            for key in ("bid1", "ask1", "last"):
-                value = data.get(key)
-                if value is None:
-                    errors.append(f"Missing recognized field {key}")
-                elif abs(float(value) / tick - round(float(value) / tick)) > 1e-7:
-                    errors.append(f"{key}={value} does not match configured tick {tick}")
-            if data.get("bid1") is not None and data.get("ask1") is not None:
-                if float(data["bid1"]) > float(data["ask1"]):
-                    errors.append("Bid is greater than ask; OCR likely misread values")
+    else:
+        tick = float(inst["min_tick"])
+        for key in ("bid1", "ask1", "last"):
+            value = data.get(key)
+            if value is not None and abs(float(value) / tick - round(float(value) / tick)) > 1e-7:
+                errors.append(f"{key}={value} does not match configured tick {tick}")
+    if data.get("bid1") is not None and data.get("ask1") is not None:
+        if float(data["bid1"]) > float(data["ask1"]):
+            errors.append("Bid is greater than ask; OCR likely misread values")
     if data.get("ocr_confidence", 1) < float(config.get("ocr_min_confidence", .85)):
         warnings.append("OCR confidence is below configured threshold; manual confirmation required")
     data["validation"] = {"valid": not errors, "errors": errors, "warnings": warnings}
     return data
 
 
-def capture_windows_process(process_name: str = PROCESS_NAME, interval: float = 0.0, count: int = 1) -> list[dict[str, Any]]:
-    """Capture visible top-level windows belonging to the named process on Windows."""
+def capture_windows_process(process_name: str = PROCESS_NAME, interval: float = 0.0, count: int = 1, capture_mode: str = "window") -> list[dict[str, Any]]:
+    """Capture WH6 window or the full monitor containing it on Windows."""
     if sys.platform != "win32":
         raise RuntimeError("Direct process-window capture requires Windows; use --image on this platform")
     try:
@@ -128,17 +132,31 @@ def capture_windows_process(process_name: str = PROCESS_NAME, interval: float = 
     if not matching:
         raise RuntimeError(f"No visible window found for process {process_name}")
     captures = []
+    if capture_mode not in ("window", "monitor"):
+        raise ValueError("capture_mode must be window or monitor")
     for idx in range(max(1, count)):
         frames = []
         for hwnd, title in matching:
             rect = win32gui.GetWindowRect(hwnd)
             if rect[2] <= rect[0] or rect[3] <= rect[1]:
                 continue
-            image = ImageGrab.grab(bbox=rect, all_screens=True)
+            if capture_mode == "monitor":
+                try:
+                    import win32api  # type: ignore
+                    monitor = win32api.MonitorFromPoint((rect[0], rect[1]), 2)
+                    monitor_info = win32api.GetMonitorInfo(monitor)
+                    bbox = monitor_info["Monitor"]
+                except ImportError:
+                    bbox = (0, 0, 1920, 1080)
+                except Exception:
+                    bbox = (0, 0, 1920, 1080)
+            else:
+                bbox = rect
+            image = ImageGrab.grab(bbox=bbox, all_screens=True)
             frames.append((title, image))
         if not frames:
             raise RuntimeError("Matching WH6 process has no capturable visible window")
-        captures.append({"frames": frames, "captured_at": datetime.now(timezone.utc).isoformat()})
+        captures.append({"frames": frames, "captured_at": datetime.now(timezone.utc).isoformat(), "capture_mode": capture_mode})
         if idx + 1 < count:
             time.sleep(max(.25, interval))
     return captures
@@ -223,6 +241,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--image", type=Path, help="OCR a saved WH6 screenshot")
     p.add_argument("--capture", action="store_true", help="capture visible WH6 process windows (Windows only)")
+    p.add_argument("--capture-mode", choices=("window", "monitor"), default="window", help="capture WH6 window or full monitor containing it")
     p.add_argument("--process", default=PROCESS_NAME)
     p.add_argument("--interval", type=float, default=1.0, help="seconds between captures in watch mode")
     p.add_argument("--watch", action="store_true", help="repeat capture/OCR until Ctrl+C")
@@ -250,7 +269,7 @@ def main() -> int:
             if args.image:
                 result = ocr_image_best(args.image, args.lang, region)
             elif args.capture:
-                captures = capture_windows_process(args.process, args.interval if args.watch else 0, 1)
+                captures = capture_windows_process(args.process, args.interval if args.watch else 0, 1, args.capture_mode)
                 result = None
                 fallback = None
                 for title, image in captures[0]["frames"]:
@@ -283,6 +302,9 @@ def main() -> int:
             else:
                 p.error("Specify --image or --capture")
             result = validate_recognized_market(result, config)
+            if result.get("ocr_confidence", 1) < float(config.get("ocr_min_confidence", .85)):
+                result["validation"]["valid"] = False
+                result["validation"]["errors"].append("OCR confidence is below threshold; manual confirmation required")
             print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
             if args.out:
                 args.out.parent.mkdir(parents=True, exist_ok=True)

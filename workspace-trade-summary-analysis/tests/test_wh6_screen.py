@@ -43,8 +43,16 @@ class WH6Tests(unittest.TestCase):
         self.assertEqual(result['source'], 'wh6_ocr')
         self.assertEqual(result['ocr_confidence'], .5)
 
+    def test_low_confidence_is_invalid(self):
+        raw = wh6.parse_wh6_ocr('PVC2701 卖出 4903 买入 4902 最新 4903', .43)
+        result = wh6.validate_recognized_market(raw, config)
+        if raw.get('ocr_confidence', 1) < config['ocr_min_confidence']:
+            result['validation']['valid'] = False
+        self.assertFalse(result['validation']['valid'])
+
     def test_process_constants(self):
         self.assertEqual(wh6.PROCESS_NAME, 'mytrader_spqh.exe')
+        self.assertIn('window', ('window', 'monitor'))
         self.assertEqual(wh6.APP_NAME, 'wh6')
 
 
