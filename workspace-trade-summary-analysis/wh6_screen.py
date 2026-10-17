@@ -104,8 +104,84 @@ def validate_recognized_market(data: dict[str, Any], config: dict[str, Any]) -> 
     return data
 
 
-def capture_windows_process(process_name: str = PROCESS_NAME, interval: float = 0.0, count: int = 1, capture_mode: str = "window") -> list[dict[str, Any]]:
-    """Capture WH6 window or the full monitor containing it on Windows."""
+def filter_window_records(records: list[dict[str, Any]], title_filter: str | None = None) -> list[dict[str, Any]]:
+    """Keep windows whose title contains the requested case-insensitive text."""
+    if not title_filter:
+        return records
+    needle = title_filter.casefold()
+    return [record for record in records if needle in str(record.get("title", "")).casefold()]
+
+
+def enumerate_windows_process(process_name: str = PROCESS_NAME) -> list[dict[str, Any]]:
+    """List visible top-level windows belonging to the requested process."""
+    if sys.platform != "win32":
+        raise RuntimeError("Process-window enumeration requires Windows")
+    try:
+        import ctypes
+        import win32gui  # type: ignore
+        import win32process  # type: ignore
+        import psutil  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("Install optional Windows packages: pywin32, psutil") from exc
+    try:
+        # Use physical screen coordinates on Windows with display scaling.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        pass
+    matching: list[dict[str, Any]] = []
+    def enum(hwnd: int, _: Any) -> None:
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        try:
+            name = psutil.Process(pid).name().casefold()
+        except (psutil.Error, OSError):
+            return
+        if name == process_name.casefold():
+            matching.append({"hwnd": hwnd, "title": win32gui.GetWindowText(hwnd), "pid": pid, "rect": win32gui.GetWindowRect(hwnd)})
+    win32gui.EnumWindows(enum, None)
+    return matching
+
+
+def _print_window(hwnd: int) -> Any | None:
+    """Capture a covered/minimized Windows window without activating it."""
+    try:
+        import ctypes
+        from PIL import Image, ImageGrab  # type: ignore
+        import win32gui  # type: ignore
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            return None
+        # PrintWindow renders the window into a compatible bitmap while the
+        # user may be viewing another application; no click or focus change.
+        image = None
+        dc = win32gui.GetWindowDC(hwnd)
+        try:
+            import win32ui  # type: ignore
+            src = win32ui.CreateDCFromHandle(dc)
+            dst = src.CreateCompatibleDC()
+            bitmap = win32ui.CreateBitmap()
+            bitmap.CreateCompatibleBitmap(src, width, height)
+            dst.SelectObject(bitmap)
+            result = ctypes.windll.user32.PrintWindow(hwnd, dst.GetSafeHdc(), 2)
+            if result:
+                bitmap_info = bitmap.GetInfo()
+                bits = bitmap.GetBitmapBits(True)
+                image = Image.frombuffer("RGB", (bitmap_info["bmWidth"], bitmap_info["bmHeight"]), bits, "raw", "BGRX", 0, 1)
+            else:
+                image = None
+            dst.DeleteDC()
+            src.DeleteDC()
+        finally:
+            win32gui.ReleaseDC(hwnd, dc)
+        return image
+    except Exception:
+        return None
+
+
+def capture_windows_process(process_name: str = PROCESS_NAME, interval: float = 0.0, count: int = 1, capture_mode: str = "app") -> list[dict[str, Any]]:
+    """Capture WH6 windows, their containing monitor, or the full desktop."""
     if sys.platform != "win32":
         raise RuntimeError("Direct process-window capture requires Windows; use --image on this platform")
     try:
@@ -116,44 +192,49 @@ def capture_windows_process(process_name: str = PROCESS_NAME, interval: float = 
     except ImportError as exc:
         raise RuntimeError("Install optional Windows packages: pywin32, psutil, Pillow") from exc
     import time
-    target = process_name.casefold()
-    matching: list[tuple[int, str]] = []
-    def enum(hwnd: int, _: Any) -> None:
-        if not win32gui.IsWindowVisible(hwnd):
-            return
-        _, pid = win32process.GetWindowThreadProcessId(hwnd)
-        try:
-            name = psutil.Process(pid).name().casefold()
-        except (psutil.Error, OSError):
-            return
-        if name == target:
-            matching.append((hwnd, win32gui.GetWindowText(hwnd)))
-    win32gui.EnumWindows(enum, None)
-    if not matching:
+    matching_records = enumerate_windows_process(process_name)
+    if not matching_records:
         raise RuntimeError(f"No visible window found for process {process_name}")
+    matching = [(record["hwnd"], record["title"]) for record in matching_records]
     captures = []
-    if capture_mode not in ("window", "monitor"):
-        raise ValueError("capture_mode must be window or monitor")
+    if capture_mode not in ("app", "window", "monitor"):
+        raise ValueError("capture_mode must be app, window, or monitor")
     for idx in range(max(1, count)):
         frames = []
+        valid_rects: list[tuple[int, int, int, int, str]] = []
         for hwnd, title in matching:
             rect = win32gui.GetWindowRect(hwnd)
-            if rect[2] <= rect[0] or rect[3] <= rect[1]:
-                continue
-            if capture_mode == "monitor":
-                try:
-                    import win32api  # type: ignore
-                    monitor = win32api.MonitorFromPoint((rect[0], rect[1]), 2)
-                    monitor_info = win32api.GetMonitorInfo(monitor)
-                    bbox = monitor_info["Monitor"]
-                except ImportError:
-                    bbox = (0, 0, 1920, 1080)
-                except Exception:
-                    bbox = (0, 0, 1920, 1080)
-            else:
-                bbox = rect
-            image = ImageGrab.grab(bbox=bbox, all_screens=True)
-            frames.append((title, image))
+            if rect[2] > rect[0] and rect[3] > rect[1]:
+                valid_rects.append((*rect, title))
+        if not valid_rects:
+            raise RuntimeError("Matching WH6 process has no capturable visible window")
+        if capture_mode == "app":
+            # Print each WH6 top-level window so OCR still works after the user
+            # switches to another application or covers WH6.
+            for hwnd, title in matching:
+                image = _print_window(hwnd)
+                if image is not None:
+                    frames.append((title, image))
+                else:
+                    rect = win32gui.GetWindowRect(hwnd)
+                    image = ImageGrab.grab(bbox=rect, all_screens=True)
+                    frames.append((title + " (screen fallback)", image))
+        else:
+            for left, top, right, bottom, title in valid_rects:
+                if capture_mode == "monitor":
+                    try:
+                        import win32api  # type: ignore
+                        monitor = win32api.MonitorFromPoint((left, top), 2)
+                        monitor_info = win32api.GetMonitorInfo(monitor)
+                        bbox = monitor_info["Monitor"]
+                    except ImportError:
+                        bbox = (0, 0, 1920, 1080)
+                    except Exception:
+                        bbox = (0, 0, 1920, 1080)
+                else:
+                    bbox = (left, top, right, bottom)
+                image = ImageGrab.grab(bbox=bbox, all_screens=True)
+                frames.append((title, image))
         if not frames:
             raise RuntimeError("Matching WH6 process has no capturable visible window")
         captures.append({"frames": frames, "captured_at": datetime.now(timezone.utc).isoformat(), "capture_mode": capture_mode})
@@ -240,8 +321,10 @@ def ocr_image_best(image_path: Path, lang: str, region: tuple[int, int, int, int
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--image", type=Path, help="OCR a saved WH6 screenshot")
+    p.add_argument("--list-windows", action="store_true", help="list visible windows for the process, then exit")
+    p.add_argument("--window-title", help="only capture windows whose title contains this text (case-insensitive)")
     p.add_argument("--capture", action="store_true", help="capture visible WH6 process windows (Windows only)")
-    p.add_argument("--capture-mode", choices=("window", "monitor"), default="window", help="capture WH6 window or full monitor containing it")
+    p.add_argument("--capture-mode", choices=("app", "window", "monitor"), default="app", help="capture WH6 application windows, one window, or full monitor")
     p.add_argument("--process", default=PROCESS_NAME)
     p.add_argument("--interval", type=float, default=1.0, help="seconds between captures in watch mode")
     p.add_argument("--watch", action="store_true", help="repeat capture/OCR until Ctrl+C")
@@ -252,6 +335,12 @@ def main() -> int:
     p.add_argument("--lang", default="chi_sim+eng")
     p.add_argument("--config", type=Path)
     args = p.parse_args()
+    if args.list_windows:
+        records = enumerate_windows_process(args.process)
+        if args.window_title:
+            records = [record for record in records if args.window_title.casefold() in record["title"].casefold()]
+        print(json.dumps(records, ensure_ascii=False, indent=2))
+        return 0 if records else 2
     config = load_config(args.config) if args.config else load_config()
     region = None
     if args.region:
@@ -272,25 +361,32 @@ def main() -> int:
                 captures = capture_windows_process(args.process, args.interval if args.watch else 0, 1, args.capture_mode)
                 result = None
                 fallback = None
-                for title, image in captures[0]["frames"]:
+                best_score = (-1, -1.0)
+                frames = captures[0]["frames"]
+                if args.window_title:
+                    needle = args.window_title.casefold()
+                    frames = [(title, image) for title, image in frames if needle in title.casefold()]
+                if not frames:
+                    raise RuntimeError(f"No captured WH6 window title contains {args.window_title!r}")
+                for frame_index, (title, image) in enumerate(frames):
                     # Save a temporary frame so OCR provenance hashes actual image bytes.
                     temp = Path.cwd() / ".wh6_capture_tmp.png"
                     image.save(temp)
-                    if args.save_capture:
-                        args.save_capture.parent.mkdir(parents=True, exist_ok=True)
-                        image.save(args.save_capture)
                     try:
                         parsed = ocr_image_best(temp, args.lang, region)
                     finally:
                         temp.unlink(missing_ok=True)
-                    if args.save_capture:
-                        parsed["image_path"] = str(args.save_capture)
-                        parsed["image_sha256"] = hashlib.sha256(args.save_capture.read_bytes()).hexdigest()
                     parsed["window_title"] = title
                     fallback = parsed
-                    if parsed.get("variety"):
+                    score = (int(parsed.get("ocr_fields_found", 0)), float(parsed.get("ocr_confidence", 0)))
+                    if score > best_score:
                         result = parsed
-                        break
+                        best_score = score
+                        if args.save_capture:
+                            args.save_capture.parent.mkdir(parents=True, exist_ok=True)
+                            image.save(args.save_capture)
+                            result["image_path"] = str(args.save_capture)
+                            result["image_sha256"] = hashlib.sha256(args.save_capture.read_bytes()).hexdigest()
                 # Preserve OCR text and image metadata when parsing fails. This
                 # makes region/contrast/parser issues diagnosable from one run.
                 if result is None:

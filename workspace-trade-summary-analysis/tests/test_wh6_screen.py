@@ -50,9 +50,17 @@ class WH6Tests(unittest.TestCase):
             result['validation']['valid'] = False
         self.assertFalse(result['validation']['valid'])
 
+    def test_window_title_filter(self):
+        records = [
+            {"title": "文华交易客户端"},
+            {"title": "WH6 Quote Panel"},
+        ]
+        self.assertEqual(wh6.filter_window_records(records, "quote"), [records[1]])
+        self.assertEqual(wh6.filter_window_records(records, None), records)
+
     def test_process_constants(self):
         self.assertEqual(wh6.PROCESS_NAME, 'mytrader_spqh.exe')
-        self.assertIn('window', ('window', 'monitor'))
+        self.assertIn('app', ('app', 'window', 'monitor'))
         self.assertEqual(wh6.APP_NAME, 'wh6')
 
 

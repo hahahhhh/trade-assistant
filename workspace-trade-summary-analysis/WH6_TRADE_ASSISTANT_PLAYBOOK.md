@@ -83,17 +83,34 @@ eng
 4. 确认右侧行情栏包含合约、卖出/买入、最新价。
 5. 先不要使用 `--watch`，先做单次识别。
 
-单次捕获并 OCR。默认推荐 `monitor`，会捕获 WH6 所在显示器的完整画面；`window` 只捕获进程窗口本身：
+单次捕获并 OCR。默认推荐 `app`，会合并捕获 `mytrader_spqh.exe` 所属的所有可见窗口，即使你切换到其他应用也能读取 WH6；`window` 只捕获单个窗口，`monitor` 捕获所在显示器：
 
 ```powershell
 python workspace-trade-summary-analysis\wh6_screen.py `
   --capture `
-  --capture-mode monitor `
+  --capture-mode app `
   --save-capture C:\wh6_data\last_capture.png `
   --tesseract-cmd "C:\Program Files\Tesseract-OCR\tesseract.exe"
 ```
 
-你的屏幕为 1920×1080 时，`last_capture.png` 应接近 1920×1080。若仍只得到约 1156×249，说明实际运行的不是最新源码包，或使用了 `--capture-mode window`。
+`app` 模式会优先使用 Windows `PrintWindow` 读取 WH6 窗口内容，因此你切换到其他应用后，仍可读取 WH6；如果 WH6 的 GPU 渲染不支持该方式，程序会自动回退到屏幕截图。它不会捕获其他应用的内容。可先列出 WH6 窗口：
+
+```powershell
+python workspace-trade-summary-analysis\wh6_screen.py --list-windows
+```
+
+如果只想识别标题中含有特定文字的窗口：
+
+```powershell
+python workspace-trade-summary-analysis\wh6_screen.py `
+  --capture `
+  --capture-mode app `
+  --window-title "文华交易客户端" `
+  --save-capture C:\wh6_data\last_capture.png `
+  --tesseract-cmd "C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
+`app` 模式不会要求截图等于 1920×1080；它保存的是 WH6 窗口本身的图像。
 
 预期输出是 JSON，至少应看到：
 
