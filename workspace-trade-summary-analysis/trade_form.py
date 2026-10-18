@@ -33,7 +33,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.6"
+FORM_VERSION = "1.7"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -71,6 +71,15 @@ def ticks_between(entry: float, price: float, tick: float) -> int:
     if tick <= 0:
         raise ValueError("tick must be positive")
     return max(1, int(round(abs(price - entry) / tick)))
+
+
+def linked_take_ticks(stop_ticks: int, ratio: float) -> int:
+    """Take-profit distance as a multiple of the stop distance (R multiple)."""
+    if ratio <= 0:
+        raise ValueError("盈亏比必须大于 0")
+    if stop_ticks <= 0:
+        raise ValueError("止损跳数必须大于 0")
+    return max(1, int(round(stop_ticks * ratio)))
 
 
 def estimate_entry(recognized: dict[str, Any], price_mode: str, direction: str, tick: float) -> float | None:
@@ -305,6 +314,8 @@ def run_form() -> int:
         "size": tk.IntVar(value=1),
         "stop_ticks": tk.IntVar(value=30),
         "step_ticks": tk.IntVar(value=1),
+        "link_take": tk.BooleanVar(value=True),
+        "rr_ratio": tk.StringVar(value="2"),
         "take_ticks": tk.IntVar(value=60),
         "entry_price": tk.StringVar(),
         "stop_loss": tk.StringVar(),
@@ -319,6 +330,9 @@ def run_form() -> int:
     recognized: dict[str, Any] = {}
     last_result: dict[str, Any] = {}
     price_spins: dict[str, Any] = {}
+    ticks_spins: dict[str, Any] = {}
+    rr_preview = tk.StringVar(value="止损 30 跳 → 止盈 60 跳")
+    rr_state: dict[str, Any] = {}
 
     def invalidate(*_: Any) -> None:
         """Any edit after a check makes the old PASS/WARN/reject stale."""
@@ -359,12 +373,35 @@ def run_form() -> int:
         if entry is None:
             form["entry_price"].set("")
             return
+        stop_ticks = _safe_int(form["stop_ticks"], 30) or 1
+        if form["link_take"].get():
+            try:
+                take_ticks = linked_take_ticks(stop_ticks, float(form["rr_ratio"].get()))
+            except ValueError as exc:
+                form["status"].set(f"止盈联动参数有误：{exc}")
+                take_ticks = _safe_int(form["take_ticks"], 60) or 1
+            else:
+                form["take_ticks"].set(take_ticks)
+                rr_preview.set(f"止损 {stop_ticks} 跳 → 止盈 {take_ticks} 跳"
+                               f"（{take_ticks * current_tick():g} 点）")
+        else:
+            take_ticks = _safe_int(form["take_ticks"], 60) or 1
+            rr_preview.set("止盈独立设置")
         form["entry_price"].set(f"{entry:g}")
-        prices = suggest_prices(entry, form["direction"].get(), current_tick(),
-                                _safe_int(form["stop_ticks"], 30), _safe_int(form["take_ticks"], 60))
+        prices = suggest_prices(entry, form["direction"].get(), current_tick(), stop_ticks, take_ticks)
         form["stop_loss"].set(f"{prices['stop_loss']:g}")
         form["take_profit"].set(f"{prices['take_profit']:g}")
         sync_increments()
+
+    def on_link_toggle() -> None:
+        """Linked mode derives take-profit from the stop; unlock to edit it."""
+        linked = bool(form["link_take"].get())
+        if "take_ticks" in ticks_spins:
+            ticks_spins["take_ticks"].configure(state="disabled" if linked else "normal")
+        box = rr_state.get("box")
+        if box is not None:
+            box.configure(state="readonly" if linked else "disabled")
+        fill_prices()
 
     def apply_market(data: dict[str, Any]) -> None:
         nonlocal recognized
@@ -454,6 +491,8 @@ def run_form() -> int:
     def check() -> None:
         nonlocal last_result
         refresh_ticks_from_prices()
+        if form["link_take"].get():
+            fill_prices()
         try:
             result = build_plan_from_form(collect(), recognized, config)
         except ValueError as exc:
@@ -597,7 +636,7 @@ def run_form() -> int:
     pad = {"padx": 8, "pady": 5}
     root.minsize(940, 720)
     root.grid_columnconfigure(0, weight=1)
-    root.grid_rowconfigure(10, weight=1)
+    root.grid_rowconfigure(11, weight=1)
 
     ttk.Label(root, textvariable=market_var, font=("Microsoft YaHei UI", 11, "bold")).grid(row=0, column=0, sticky="w", **pad)
 
@@ -625,16 +664,30 @@ def run_form() -> int:
         ("止盈跳数", "take_ticks", 1, 400, 6),
     )):
         ttk.Label(nums, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 20, 4))
-        ttk.Spinbox(nums, from_=start, to=end, width=width, textvariable=form[key],
-                    command=fill_prices).grid(row=0, column=column * 2 + 1, sticky="w")
+        tick_spin = ttk.Spinbox(nums, from_=start, to=end, width=width, textvariable=form[key],
+                                command=fill_prices)
+        tick_spin.grid(row=0, column=column * 2 + 1, sticky="w")
+        ticks_spins[key] = tick_spin
     ttk.Label(nums, text="价格调整步长（跳）").grid(row=0, column=6, sticky="w", padx=(20, 4))
     step_box = ttk.Combobox(nums, textvariable=form["step_ticks"], values=STEP_CHOICES,
                             width=4, state="readonly")
     step_box.grid(row=0, column=7, sticky="w")
     step_box.bind("<<ComboboxSelected>>", lambda _event: (sync_increments(), fill_prices()))
 
+    risk_row = ttk.Frame(root)
+    risk_row.grid(row=4, column=0, sticky="w", **pad)
+    ttk.Checkbutton(risk_row, text="止盈 = 止损 ×", variable=form["link_take"],
+                    command=on_link_toggle).grid(row=0, column=0, sticky="w")
+    rr_box = ttk.Combobox(risk_row, textvariable=form["rr_ratio"], values=("1", "1.5", "2", "3", "4"), width=5)
+    rr_box.grid(row=0, column=1, sticky="w", padx=4)
+    for event in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
+        rr_box.bind(event, lambda _event: fill_prices())
+    rr_state["box"] = rr_box
+    ttk.Label(risk_row, text="倍（x > 0）").grid(row=0, column=2, sticky="w")
+    ttk.Label(risk_row, textvariable=rr_preview, foreground="#555").grid(row=0, column=3, sticky="w", padx=(16, 0))
+
     prices = ttk.Frame(root)
-    prices.grid(row=4, column=0, sticky="w", **pad)
+    prices.grid(row=5, column=0, sticky="w", **pad)
     for column, (label, key) in enumerate((("入场", "entry_price"), ("止损", "stop_loss"), ("止盈", "take_profit"))):
         ttk.Label(prices, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 20, 4))
         spin = ttk.Spinbox(prices, textvariable=form[key], width=11, from_=0, to=1000000, increment=1)
@@ -642,7 +695,7 @@ def run_form() -> int:
         price_spins[key] = spin
 
     smc = ttk.LabelFrame(root, text="SMC 标签")
-    smc.grid(row=5, column=0, sticky="ew", **pad)
+    smc.grid(row=6, column=0, sticky="ew", **pad)
     for column in range(4):
         smc.grid_columnconfigure(column, weight=1, uniform="smc")
     for index, tag in enumerate(smc_tags):
@@ -654,7 +707,7 @@ def run_form() -> int:
         row=custom_row, column=1, columnspan=3, sticky="w", padx=6, pady=(6, 4))
 
     htf = ttk.LabelFrame(root, text="HTF Bias")
-    htf.grid(row=6, column=0, sticky="ew", **pad)
+    htf.grid(row=7, column=0, sticky="ew", **pad)
     for column in range(4):
         htf.grid_columnconfigure(column, weight=1, uniform="htf")
     for index, (label, value) in enumerate(HTF_CHOICES):
@@ -662,26 +715,27 @@ def run_form() -> int:
             row=0, column=index, sticky="w", padx=6, pady=4)
 
     tess = ttk.Frame(root)
-    tess.grid(row=7, column=0, sticky="ew", **pad)
+    tess.grid(row=8, column=0, sticky="ew", **pad)
     ttk.Label(tess, text="Tesseract").grid(row=0, column=0, sticky="w")
     ttk.Entry(tess, textvariable=form["tesseract_cmd"]).grid(row=0, column=1, sticky="ew", padx=6)
     tess.grid_columnconfigure(1, weight=1)
 
     actions = ttk.Frame(root)
-    actions.grid(row=8, column=0, sticky="w", **pad)
+    actions.grid(row=9, column=0, sticky="w", **pad)
     for column, (label, command) in enumerate((
         ("刷新行情", refresh), ("手工填价", manual_market),
         ("检查计划", check), ("保存计划", save), ("品种配置", edit_config),
     )):
         ttk.Button(actions, text=label, command=command, width=12).grid(row=0, column=column, padx=6)
 
-    ttk.Label(root, textvariable=form["status"], foreground="#333").grid(row=9, column=0, sticky="w", **pad)
-    output.grid(row=10, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    ttk.Label(root, textvariable=form["status"], foreground="#333").grid(row=10, column=0, sticky="w", **pad)
+    output.grid(row=11, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
     def on_close() -> None:
         save_state({"tesseract_cmd": form["tesseract_cmd"].get()})
         root.destroy()
 
+    on_link_toggle()
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
     return 0

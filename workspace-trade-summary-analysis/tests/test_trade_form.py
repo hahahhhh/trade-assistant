@@ -47,6 +47,15 @@ class FormLogicTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tf.suggest_prices(4903, 'sideways', 1, 30, 60)
 
+    def test_linked_take_ticks(self):
+        self.assertEqual(tf.linked_take_ticks(20, 2), 40)
+        self.assertEqual(tf.linked_take_ticks(30, 1.5), 45)
+        self.assertEqual(tf.linked_take_ticks(10, 0.4), 4)
+        self.assertEqual(tf.linked_take_ticks(1, 0.1), 1)
+        for bad_stop, bad_ratio in ((30, 0), (30, -1), (0, 2)):
+            with self.assertRaises(ValueError):
+                tf.linked_take_ticks(bad_stop, bad_ratio)
+
     def test_ticks_between(self):
         self.assertEqual(tf.ticks_between(19890, 19790, 5), 20)
         self.assertEqual(tf.ticks_between(19890, 19890, 5), 1)
