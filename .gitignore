@@ -6,6 +6,7 @@
 !/workspace-trade-summary-analysis/trade_assistant.py
 !/workspace-trade-summary-analysis/wh6_screen.py
 !/workspace-trade-summary-analysis/analyze_trades.py
+!/workspace-trade-summary-analysis/trade_form.py
 !/workspace-trade-summary-analysis/TRADE_ASSISTANT_README.md
 !/workspace-trade-summary-analysis/WH6_TRADE_ASSISTANT_PLAYBOOK.md
 !/workspace-trade-summary-analysis/AB_MODEL_ARCHIVE.md

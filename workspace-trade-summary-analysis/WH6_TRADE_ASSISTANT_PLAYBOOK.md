@@ -33,6 +33,7 @@ workspace-trade-summary-analysis/
 ├── trade_assistant.py                    # 风险与交易计划检查引擎
 ├── wh6_screen.py                         # WH6 窗口/截图 OCR 适配器
 ├── analyze_trades.py                     # 交易账本分析脚本
+├── trade_form.py                         # tkinter 按钮表单
 ├── trade_assistant_config.json           # 品种风险和枚举配置
 ├── TRADE_ASSISTANT_README.md             # 基础使用说明
 ├── WH6_TRADE_ASSISTANT_PLAYBOOK.md       # 本文档
@@ -396,7 +397,35 @@ workspace-trade-summary-analysis/data/trade_assistant/report.json
 
 小样本分组不能直接升级为交易规则。必须结合未来影子样本验证。
 
-## 12. 日常运行建议
+## 12. 按钮界面（tkinter）
+
+不想每次敲命令行参数时，用图形表单：
+
+```powershell
+python workspace-trade-summary-analysis\trade_form.py
+```
+
+窗口内全部是按钮/单选：
+
+- 方向：买多 / 卖空；
+- 价格：对手价 / 排队价 / 最新价 / 手工价；
+- 手数、止损跳数、止盈跳数：数字框，自动算出止损价和止盈价；
+- SMC 标签：预置按钮 + “自定义”输入框；
+- HTF Bias：多头 / 空头 / 震荡 / 不清晰；
+- 加仓：勾选框。
+
+操作顺序：
+
+1. 点「刷新行情」读取 WH6 右侧行情栏（约 1–2 秒）；
+2. 选方向、价格、止损跳数，价格自动填入；
+3. 点「检查计划」看 `PASS` / `WARN` / `REJECT` 与风险金额；
+4. 点「保存计划」写入 `data/plans/plan-*.json` 并追加快照。
+
+如果 OCR 失败或当前不在 Windows，用「手工填价」输入合约、买一、卖一、最新价，后续检查逻辑完全相同。
+
+界面同样只读：不点击 WH6、不提交订单。Tesseract 路径可在窗口底部修改，关闭时自动记住。
+
+## 13. 日常运行建议
 
 每笔交易前：
 
@@ -424,7 +453,7 @@ workspace-trade-summary-analysis/data/trade_assistant/report.json
 - 不自动修改规则；
 - 形成候选规则，人工确认后再升级。
 
-## 13. 安全边界
+## 14. 安全边界
 
 本工具面向仿真/研究辅助。它不接入券商、不读取账户资金、不自动下单。任何 OCR 识别错误都可能导致错误的交易计划，因此：
 
