@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "2.1"
+FORM_VERSION = "2.2"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -817,7 +817,7 @@ def run_form() -> int:
         variety = recognized.get("variety")
         instrument = config["instruments"].get(variety) if variety else None
         if not instrument or not instrument.get("configured"):
-            messagebox.showinfo("按 R 下单", "该品种尚未启用风险配置，无法计算手数")
+            messagebox.showinfo("按 R 下单", "该品种尚未启用风险配置，无法计算手数", parent=root)
             return
         try:
             sizing = size_by_risk(current_budget(),
@@ -825,10 +825,10 @@ def run_form() -> int:
                                   float(instrument["value_per_tick"]),
                                   per_lot_cost(instrument))
         except ValueError as exc:
-            messagebox.showerror("按 R 下单", str(exc))
+            messagebox.showerror("按 R 下单", str(exc), parent=root)
             return
         if sizing["lots"] < 1:
-            messagebox.showinfo("按 R 下单", "1R 预算不足以开 1 手，请放宽止损或提高预算")
+            messagebox.showinfo("按 R 下单", "1R 预算不足以开 1 手，请放宽止损或提高预算", parent=root)
             return
         form["size"].set(int(sizing["lots"]))
         check()
@@ -985,7 +985,7 @@ def run_form() -> int:
             return
         duplicate = find_duplicate_plan(last_result["plan"])
         if duplicate is not None:
-            if not messagebox.askyesno("重复计划", f"相同内容的计划已存在：\n{duplicate.name}\n\n仍要再保存一份吗？"):
+            if not messagebox.askyesno("重复计划", f"相同内容的计划已存在：\n{duplicate.name}\n\n仍要再保存一份吗？", parent=root):
                 form["status"].set("已取消保存（内容相同的计划已存在）")
                 return
         PLAN_DIR.mkdir(parents=True, exist_ok=True)
@@ -1005,6 +1005,7 @@ def run_form() -> int:
         """Type bid/ask by hand; prefill the last recognized quote."""
         win = tk.Toplevel(root)
         win.title("手工填价")
+        win.transient(root)
         prefill = manual_prefill(recognized)
         entries: dict[str, tk.StringVar] = {key: tk.StringVar(value=value) for key, value in prefill.items()}
 
@@ -1020,7 +1021,7 @@ def run_form() -> int:
             contract = entries["contract"].get().strip().upper()
             match = re.match(r"([A-Z]+)(\d+)$", contract)
             if not match:
-                messagebox.showerror("合约格式", "合约应形如 V2701 或 RB2701")
+                messagebox.showerror("合约格式", "合约应形如 V2701 或 RB2701", parent=win)
                 return
             data: dict[str, Any] = {
                 "variety": "V" if match.group(1) == "PVC" else match.group(1),
@@ -1036,7 +1037,7 @@ def run_form() -> int:
                 try:
                     data[key] = float(raw)
                 except ValueError:
-                    messagebox.showerror("数值格式", f"{key} 不是数字：{raw}")
+                    messagebox.showerror("数值格式", f"{key} 不是数字：{raw}", parent=win)
                     return
             apply_market(data)
             win.destroy()
@@ -1047,6 +1048,7 @@ def run_form() -> int:
         """Edit per-instrument risk parameters without touching JSON by hand."""
         win = tk.Toplevel(root)
         win.title("品种配置（写入 trade_assistant_config.json）")
+        win.transient(root)
         codes = list(config["instruments"].keys())
         default = recognized.get("variety") if recognized.get("variety") in codes else codes[0]
         code_var = tk.StringVar(value=default)
@@ -1097,7 +1099,7 @@ def run_form() -> int:
             try:
                 config = save_instrument_config(config, code_var.get(), values)
             except (ValueError, OSError) as exc:
-                messagebox.showerror("配置有误", str(exc))
+                messagebox.showerror("配置有误", str(exc), parent=win)
                 return
             inst = config["instruments"][code_var.get()]
             form["status"].set(
@@ -1120,6 +1122,9 @@ def run_form() -> int:
         win = tk.Toplevel(root)
         win.title("历史交易计划")
         win.geometry("1080x620")
+        # Without an owner the dialogs attach to the maximized main window and
+        # it covers this list, which looks like the window "minimised".
+        win.transient(root)
         rows = load_history()
         variety_var = tk.StringVar(value="全部")
         summary = tk.StringVar(value="")
@@ -1181,9 +1186,9 @@ def run_form() -> int:
         def delete_selected() -> None:
             chosen = selected_rows()
             if not chosen:
-                messagebox.showinfo("删除", "请先选中要删除的计划")
+                messagebox.showinfo("删除", "请先选中要删除的计划", parent=win)
                 return
-            if not messagebox.askyesno("删除", f"删除选中的 {len(chosen)} 条计划文件？\n快照记录会保留作为审计痕迹。"):
+            if not messagebox.askyesno("删除", f"删除选中的 {len(chosen)} 条计划文件？\n快照记录会保留作为审计痕迹。", parent=win):
                 return
             removed = 0
             for row in chosen:
@@ -1193,14 +1198,16 @@ def run_form() -> int:
                         Path(path).unlink()
                         removed += 1
                     except OSError as exc:
-                        messagebox.showerror("删除失败", f"{path}\n{exc}")
+                        messagebox.showerror("删除失败", f"{path}\n{exc}", parent=win)
             refresh()
+            win.lift()
+            win.focus_force()
             form["status"].set(f"已删除 {removed} 条计划文件（快照保留）")
 
         def export() -> None:
             chosen = selected_rows() or rows
             if not chosen:
-                messagebox.showinfo("导出", "没有可导出的记录")
+                messagebox.showinfo("导出", "没有可导出的记录", parent=win)
                 return
             target = filedialog.asksaveasfilename(
                 parent=win, title="导出历史计划", defaultextension=".csv",
@@ -1208,7 +1215,8 @@ def run_form() -> int:
             if not target:
                 return
             count = export_history_csv(chosen, Path(target))
-            messagebox.showinfo("导出", f"已导出 {count} 条到\n{target}")
+            messagebox.showinfo("导出", f"已导出 {count} 条到\n{target}", parent=win)
+            win.lift()
 
         def open_folder() -> None:
             PLAN_DIR.mkdir(parents=True, exist_ok=True)
@@ -1216,7 +1224,7 @@ def run_form() -> int:
                 import os
                 os.startfile(str(PLAN_DIR))  # type: ignore[attr-defined]
             except (AttributeError, OSError) as exc:
-                messagebox.showinfo("目录", f"{PLAN_DIR}\n{exc}")
+                messagebox.showinfo("目录", f"{PLAN_DIR}\n{exc}", parent=win)
 
         buttons = ttk.Frame(top)
         buttons.pack(side="right")
@@ -1229,7 +1237,7 @@ def run_form() -> int:
         try:
             render()
         except Exception as exc:  # keep the window usable and explain what broke
-            messagebox.showerror("历史计划", f"列表渲染失败：{exc}")
+            messagebox.showerror("历史计划", f"列表渲染失败：{exc}", parent=win)
 
     # ---- layout -----------------------------------------------------------
     # Two columns: an order ticket that follows the decision order on the left,
