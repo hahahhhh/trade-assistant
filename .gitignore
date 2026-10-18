@@ -14,6 +14,7 @@
 /workspace-trade-summary-analysis/tests/*
 !/workspace-trade-summary-analysis/tests/test_trade_assistant.py
 !/workspace-trade-summary-analysis/tests/test_wh6_screen.py
+!/workspace-trade-summary-analysis/tests/test_trade_form.py
 !/workspace-trade-summary-analysis/data/
 /workspace-trade-summary-analysis/data/*
 !/workspace-trade-summary-analysis/data/trade_assistant_config.json
