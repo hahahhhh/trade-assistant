@@ -43,7 +43,14 @@ class PlanTests(unittest.TestCase):
         return plan
 
     def test_valid_plan_passes(self):
-        self.assertEqual(ta.check_plan(self.plan(), CONFIG)["status"], "PASS")
+        # 30 ticks x ¥5 = ¥150, comfortably below the ¥200 cap.
+        self.assertEqual(ta.check_plan(self.plan(stop_loss=4873), CONFIG)["status"], "PASS")
+
+    def test_plan_at_cap_warns(self):
+        # Exactly ¥200 gross with a zero fee buffer is not a clean pass.
+        result = ta.check_plan(self.plan(stop_loss=4863), CONFIG)
+        self.assertEqual(result["status"], "WARN")
+        self.assertIn("per-trade limit", " ".join(result["warnings"]))
 
     def test_wrong_directional_stop_rejected(self):
         result = ta.check_plan(self.plan(stop_loss=4910), CONFIG)

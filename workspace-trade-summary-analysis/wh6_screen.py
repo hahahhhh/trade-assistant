@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -393,6 +394,7 @@ def ocr_quote_image(
     best: dict[str, Any] | None = None
     best_score = (-1, -1.0)
     calls = 0
+    started = time.perf_counter()
     for crop_name, box, variant_name, psms in tiers:
         working = image if box is None else image.crop(box)
         for psm in psms:
@@ -412,6 +414,7 @@ def ocr_quote_image(
     assert best is not None
     best["ocr_effort"] = effort
     best["ocr_calls"] = calls
+    best["ocr_seconds"] = round(time.perf_counter() - started, 2)
     best["image_path"] = str(image_path)
     best["image_sha256"] = hashlib.sha256(image_path.read_bytes()).hexdigest()
     best["captured_at"] = datetime.now(timezone.utc).isoformat()

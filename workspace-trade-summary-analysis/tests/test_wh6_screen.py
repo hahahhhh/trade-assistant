@@ -97,14 +97,14 @@ class WH6Tests(unittest.TestCase):
             'ocr_confidence': 0.86, 'source': 'wh6_ocr',
         }
         plan = wh6.build_plan_draft(
-            recognized, direction='long', stop_loss=4863,
+            recognized, direction='long', stop_loss=4873,
             smc_tag='FVG', htf_bias='long',
         )
         self.assertEqual(plan['contract'], 'V2701')
         self.assertEqual(plan['contract_label'], 'PVC2701')
         result = wh6.check_plan(plan, config)
         self.assertEqual(result['status'], 'PASS')
-        self.assertEqual(result['risk']['total_risk_rmb'], 200.0)
+        self.assertEqual(result['risk']['total_risk_rmb'], 150.0)
 
     def test_plan_draft_without_direction_is_rejected(self):
         recognized = {'variety': 'V', 'contract': 'PVC2701', 'bid1': 4902.0, 'ask1': 4903.0, 'last': 4903.0}

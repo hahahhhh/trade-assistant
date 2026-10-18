@@ -155,6 +155,13 @@ def check_plan(plan: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
                 limit = float(instrument["single_trade_limit_rmb"])
                 if risk["total_risk_rmb"] > limit + 1e-9:
                     hard.append(f"Plan risk ¥{risk['total_risk_rmb']:.2f} exceeds {code} limit ¥{limit:.2f}")
+                elif risk["total_risk_rmb"] >= limit * 0.95:
+                    # Being at the cap with an unrecorded fee buffer means the
+                    # true cost is above the cap, so surface it before entry.
+                    warnings.append(
+                        f"Plan uses {risk['total_risk_rmb'] / limit:.0%} of the {code} per-trade limit "
+                        f"¥{limit:.0f}; fees/slippage buffer is ¥{risk['cost_buffer_rmb']:.0f}"
+                    )
                 max_ticks = math.floor(max(0, limit - risk["cost_buffer_rmb"]) / float(instrument["value_per_tick"]) / int(plan["size"]))
                 risk["single_trade_limit_rmb"] = limit
                 risk["max_ticks_at_size"] = float(max_ticks)
