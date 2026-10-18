@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "2.3"
+FORM_VERSION = "2.4"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -1156,15 +1156,27 @@ def run_form() -> int:
         variety_var = tk.StringVar(value="全部")
         summary = tk.StringVar(value="")
 
-        top = ttk.Frame(win)
-        top.pack(fill="x", padx=8, pady=6)
-        ttk.Label(top, text="品种").pack(side="left")
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
+
+        top = ttk.Frame(win, padding=(8, 8, 8, 4))
+        top.grid(row=0, column=0, sticky="ew")
+        top.grid_columnconfigure(1, weight=1)
+        ttk.Label(top, text="品种").grid(row=0, column=0, sticky="w")
         codes = ["全部"] + [code for code, _ in group_by_variety(rows)]
         variety_box = ttk.Combobox(top, textvariable=variety_var, values=codes,
                                    width=10, state="readonly")
-        variety_box.pack(side="left", padx=6)
+        variety_box.grid(row=0, column=1, sticky="w", padx=6)
 
-        table = ttk.Treeview(win, show="tree headings",
+        toolbar_buttons = ttk.Frame(top)
+        toolbar_buttons.grid(row=0, column=2, sticky="e")
+
+        table_frame = ttk.Frame(win, padding=(8, 0, 8, 0))
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.grid_columnconfigure(0, weight=1)
+        table_frame.grid_rowconfigure(0, weight=1)
+
+        table = ttk.Treeview(table_frame, show="tree headings",
                              columns=[key for key, _ in HISTORY_COLUMNS])
         table.column("#0", width=90, anchor="w")
         table.heading("#0", text="品种")
@@ -1174,10 +1186,15 @@ def run_form() -> int:
         for key, label in HISTORY_COLUMNS:
             table.column(key, width=widths.get(key, 80), anchor="w")
             table.heading(key, text=label)
-        scroll = ttk.Scrollbar(win, orient="vertical", command=table.yview)
+        table.grid(row=0, column=0, sticky="nsew")
+
+        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
         table.configure(yscrollcommand=scroll.set)
-        table.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=(0, 8))
-        scroll.pack(side="left", fill="y", padx=(0, 8), pady=(0, 8))
+
+        footer = ttk.Frame(win, padding=(8, 4, 8, 8))
+        footer.grid(row=2, column=0, sticky="ew")
+        ttk.Label(footer, textvariable=summary, foreground="#555").pack(anchor="w")
 
         rows_by_iid: dict[str, dict[str, Any]] = {}
 
@@ -1298,13 +1315,10 @@ def run_form() -> int:
             except (AttributeError, OSError) as exc:
                 messagebox.showinfo("目录", f"{PLAN_DIR}\n{exc}", parent=win)
 
-        buttons = ttk.Frame(top)
-        buttons.pack(side="right")
         for label, command in (("刷新", refresh), ("导出 CSV", export),
                                ("删除选中", delete_selected), ("打开目录", open_folder)):
-            ttk.Button(buttons, text=label, command=command, width=10).pack(side="left", padx=4)
+            ttk.Button(toolbar_buttons, text=label, command=command, width=10).pack(side="left", padx=4)
 
-        ttk.Label(win, textvariable=summary, foreground="#555").pack(anchor="w", padx=10, pady=(0, 4))
         variety_box.bind("<<ComboboxSelected>>", render)
         try:
             render()
