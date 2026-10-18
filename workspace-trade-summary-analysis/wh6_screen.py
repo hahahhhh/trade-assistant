@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from trade_assistant import load_config, check_plan, save_snapshot
+    from trade_assistant import load_config, check_plan, save_snapshot, calculate_risk
 except ModuleNotFoundError:  # direct file import from the test runner
     import importlib.util
     _spec = importlib.util.spec_from_file_location("trade_assistant", Path(__file__).with_name("trade_assistant.py"))
@@ -25,8 +25,9 @@ except ModuleNotFoundError:  # direct file import from the test runner
     assert _spec.loader is not None
     _spec.loader.exec_module(_module)
     load_config, check_plan, save_snapshot = _module.load_config, _module.check_plan, _module.save_snapshot
+    calculate_risk = _module.calculate_risk
 
-TOOL_VERSION = "2026-10.13"
+TOOL_VERSION = "2026-10.14"
 PROCESS_NAME = "mytrader_spqh.exe"
 APP_NAME = "wh6"
 

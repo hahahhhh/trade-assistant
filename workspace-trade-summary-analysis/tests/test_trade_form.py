@@ -261,6 +261,34 @@ class FormLogicTests(unittest.TestCase):
             self.assertIn('PVC2701', text)
             self.assertIn('PASS', text)
 
+    def test_risk_ratio_and_level(self):
+        self.assertEqual(tf.risk_ratio(75, 200), 0.375)
+        self.assertEqual(tf.risk_ratio(10, 0), 0.0)
+        self.assertEqual(tf.risk_level(0.5), 'ok')
+        self.assertEqual(tf.risk_level(0.96), 'warn')
+        self.assertEqual(tf.risk_level(1.2), 'over')
+
+    def test_status_badge_staleness_wins(self):
+        self.assertEqual(tf.status_badge('PASS', True)[0], '已过期，需重新检查')
+        self.assertEqual(tf.status_badge('PASS', False)[0], 'PASS 通过')
+        self.assertEqual(tf.status_badge('REJECT', False)[0], 'REJECT 阻断')
+        self.assertEqual(tf.status_badge(None, False)[0], '未检查')
+
+    def test_risk_preview_matches_check_plan(self):
+        preview = tf.risk_preview(
+            {'direction': 'long', 'price_mode': 'opponent', 'size': 1, 'stop_loss': 4873.0},
+            RECOGNIZED, config)
+        self.assertEqual(preview['per_lot_risk'], 150)
+        self.assertEqual(preview['total_risk'], 150)
+        self.assertEqual(preview['ratio'], 0.75)
+        self.assertEqual(preview['level'], 'ok')
+        self.assertEqual(preview['max_ticks_at_size'], 40)
+
+    def test_risk_preview_reports_missing_market(self):
+        preview = tf.risk_preview({'direction': 'long', 'size': 1, 'stop_loss': 4873.0},
+                                  {'variety': 'V'}, config)
+        self.assertIn('error', preview)
+
     def test_summarize_and_market_summary(self):
         result = tf.build_plan_from_form(fields(), RECOGNIZED, config)
         text = tf.summarize(result)

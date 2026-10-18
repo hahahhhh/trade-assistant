@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.14"
+FORM_VERSION = "2.0"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -442,6 +442,96 @@ def find_duplicate_plan(plan: dict[str, Any], plans_dir: Path = PLAN_DIR) -> Pat
     return None
 
 
+THEME = {
+    "ok": "#1a7f37",
+    "warn": "#b26a00",
+    "danger": "#c62828",
+    "muted": "#666666",
+    "track": "#e0e0e0",
+    "stale_bg": "#eeeeee",
+    "band_low": "#fff7d6",
+    "font_body": ("Microsoft YaHei UI", 10),
+    "font_title": ("Microsoft YaHei UI", 12, "bold"),
+    "font_price": ("Consolas", 14, "bold"),
+    "font_badge": ("Microsoft YaHei UI", 16, "bold"),
+    "pad": 8,
+}
+
+BADGE_STYLES = {
+    "未检查": ("未检查", THEME["muted"], "#f2f2f2"),
+    "已过期": ("已过期，需重新检查", THEME["muted"], THEME["stale_bg"]),
+    "PASS": ("PASS 通过", THEME["ok"], "#e8f5e9"),
+    "WARN": ("WARN 有警告", THEME["warn"], "#fff4e0"),
+    "REJECT": ("REJECT 阻断", THEME["danger"], "#fdecea"),
+}
+
+
+def risk_ratio(total: float, limit: float) -> float:
+    """Share of the per-trade cap consumed; 0 when unknown."""
+    if limit <= 0:
+        return 0.0
+    return max(0.0, float(total) / float(limit))
+
+
+def risk_level(ratio: float) -> str:
+    if ratio > 1:
+        return "over"
+    if ratio >= 0.95:
+        return "warn"
+    return "ok"
+
+
+def status_badge(status: str | None, stale: bool) -> tuple[str, str, str]:
+    """(text, foreground, background); staleness outranks any old verdict."""
+    if stale:
+        return BADGE_STYLES["已过期"]
+    if status in BADGE_STYLES:
+        return BADGE_STYLES[status]
+    return BADGE_STYLES["未检查"]
+
+
+def risk_preview(fields: dict[str, Any], recognized: dict[str, Any],
+                 config: dict[str, Any]) -> dict[str, Any]:
+    """Live risk numbers without running the full rule check."""
+    variety = recognized.get("variety")
+    instrument = config["instruments"].get(variety) if variety else None
+    if not instrument or not instrument.get("configured"):
+        return {"error": "该品种尚未启用风险配置"}
+    tick = float(instrument["min_tick"])
+    direction = fields.get("direction")
+    entry = estimate_entry(recognized, fields.get("price_mode") or "opponent", direction, tick)
+    if entry is None:
+        raw = str(fields.get("entry_price") or "").strip()
+        try:
+            entry = float(raw)
+        except ValueError:
+            return {"error": "缺少入场价"}
+    try:
+        stop = float(fields.get("stop_loss"))
+    except (TypeError, ValueError):
+        return {"error": "缺少止损价"}
+    size = int(fields.get("size") or 1)
+    try:
+        risk = wh6.calculate_risk(entry, stop, size, instrument)
+    except (ValueError, KeyError) as exc:
+        return {"error": str(exc)}
+    limit = float(instrument["single_trade_limit_rmb"])
+    value_per_tick = float(instrument["value_per_tick"])
+    ticks = risk["ticks"]
+    return {
+        "entry": entry,
+        "stop": stop,
+        "size": size,
+        "ticks": ticks,
+        "per_lot_risk": ticks * value_per_tick,
+        "total_risk": risk["total_risk_rmb"],
+        "limit": limit,
+        "ratio": risk_ratio(risk["total_risk_rmb"], limit),
+        "level": risk_level(risk_ratio(risk["total_risk_rmb"], limit)),
+        "max_ticks_at_size": int(max(0, limit) // (value_per_tick * size)) if size else 0,
+    }
+
+
 def manual_prefill(recognized: dict[str, Any]) -> dict[str, str]:
     """Initial values for the manual-price dialog, taken from the last quote."""
     label = recognized.get("contract_label") or recognized.get("contract") or ""
@@ -519,28 +609,103 @@ def run_form() -> int:
     rr_state: dict[str, Any] = {}
     sizing_text = tk.StringVar(value="1R 计算：等待行情")
     budget_spin: dict[str, Any] = {}
+    widgets: dict[str, Any] = {}
+    header = {
+        "contract": tk.StringVar(value="尚未读取行情"),
+        "ask": tk.StringVar(value="—"),
+        "bid": tk.StringVar(value="—"),
+        "last": tk.StringVar(value="—"),
+        "meta": tk.StringVar(value="点击「刷新行情」或手工填价"),
+    }
+    badge_text = tk.StringVar(value="未检查")
+    metrics = {key: tk.StringVar(value="—") for key in ("per_lot", "total", "limit", "remain", "cap")}
+    ratio_var = tk.DoubleVar(value=0.0)
+    ratio_note = tk.StringVar(value="")
+    checked_at = tk.StringVar(value="尚未检查")
+    apply_text = tk.StringVar(value="套用建议手数")
+    version_info = tk.StringVar(value=f"v{FORM_VERSION} · 尚未检查")
+
+    def set_badge(status: str | None, stale: bool) -> None:
+        text, fg, bg = status_badge(status, stale)
+        badge_text.set(text)
+        badge = widgets.get("badge")
+        if badge is not None:
+            badge.configure(foreground=fg, background=bg)
+        save_button = widgets.get("save")
+        if save_button is not None:
+            usable = (not stale) and status in ("PASS", "WARN")
+            save_button.configure(state="normal" if usable else "disabled")
+
+    def update_metrics() -> None:
+        """Live risk numbers; does not decide PASS/REJECT."""
+        try:
+            fields = collect()
+        except ValueError:
+            for var in metrics.values():
+                var.set("—")
+            ratio_var.set(0)
+            ratio_note.set("")
+            return
+        preview = risk_preview(fields, recognized, config)
+        if "error" in preview:
+            for key in ("per_lot", "total", "remain", "cap"):
+                metrics[key].set("—")
+            metrics["limit"].set("—")
+            ratio_var.set(0)
+            ratio_note.set(preview["error"])
+            return
+        metrics["per_lot"].set(f"¥{preview['per_lot_risk']:g}")
+        metrics["total"].set(f"¥{preview['total_risk']:g}")
+        metrics["limit"].set(f"¥{preview['limit']:g}")
+        remain = preview["limit"] - preview["total_risk"]
+        metrics["remain"].set(f"¥{remain:g}")
+        metrics["cap"].set(f"{preview['max_ticks_at_size']} 跳（{preview['max_ticks_at_size'] * current_tick():g} 点）")
+        ratio_var.set(min(preview["ratio"], 1.5) * 100)
+        if preview["level"] == "over":
+            ratio_note.set(f"超出上限 ¥{preview['total_risk'] - preview['limit']:g}")
+        elif preview["level"] == "warn":
+            ratio_note.set("接近上限，注意成本")
+        else:
+            ratio_note.set(f"占上限 {preview['ratio']:.0%}")
 
     def invalidate(*_: Any) -> None:
         """Any edit after a check makes the old PASS/WARN/reject stale."""
         if last_result:
             last_result.clear()
             status = form["status"].get()
-            if status.startswith(("检查完成", "已保存")):
+            if status.startswith(("检查完成", "已保存", "已按")):
                 form["status"].set("参数已修改，需重新点「检查计划」")
+        set_badge(None, True)
+        update_metrics()
 
     for key in ("direction", "price_mode", "size", "stop_ticks", "take_ticks",
                 "entry_price", "stop_loss", "take_profit", "smc_tag", "smc_custom",
                 "htf_bias", "is_add_on"):
         form[key].trace_add("write", invalidate)
 
-    market_var = tk.StringVar(value="尚未读取行情")
-    output = tk.Text(root, height=10, width=90, state="disabled", wrap="word")
+    def _fill_text(key: str, text: str) -> None:
+        target = widgets.get(key)
+        if target is None:
+            return
+        target.configure(state="normal")
+        target.delete("1.0", "end")
+        target.insert("1.0", text)
+        target.configure(state="disabled")
 
     def write_output(text: str) -> None:
-        output.configure(state="normal")
-        output.delete("1.0", "end")
-        output.insert("1.0", text)
-        output.configure(state="disabled")
+        _fill_text("detail", text)
+
+    def write_ocr(text: str) -> None:
+        _fill_text("ocr", text)
+
+    def append_log(line: str) -> None:
+        target = widgets.get("log")
+        if target is None:
+            return
+        target.configure(state="normal")
+        target.insert("end", line + "\n")
+        target.configure(state="disabled")
+        target.see("end")
 
     def current_tick() -> float:
         variety = recognized.get("variety")
@@ -579,6 +744,7 @@ def run_form() -> int:
         form["take_profit"].set(f"{prices['take_profit']:g}")
         sync_increments()
         update_sizing()
+        update_metrics()
 
     def sync_budget() -> None:
         """Keep 1R equal to the instrument cap when the checkbox is on."""
@@ -620,8 +786,11 @@ def run_form() -> int:
                 f" → {sizing['lots']} 手（风险 ¥{sizing['risk_rmb']:g}，余 ¥{sizing['remainder']:g}）")
         if sizing["lots"] < 1:
             text += "｜1R 不足 1 手"
-        elif sizing["risk_rmb"] > limit:
-            text += f"｜⚠ 超过单笔上限 ¥{limit:g}"
+            apply_text.set("1R 不足 1 手")
+        else:
+            if sizing["risk_rmb"] > limit:
+                text += f"｜⚠ 超过单笔上限 ¥{limit:g}"
+            apply_text.set(f"套用 {sizing['lots']} 手")
         sizing_text.set(text)
 
     def apply_sizing() -> None:
@@ -658,7 +827,16 @@ def run_form() -> int:
         nonlocal recognized
         recognized = data
         recognized["contract_label"] = data.get("contract")
-        market_var.set(market_summary(data))
+        header["contract"].set(data.get("contract_label") or data.get("contract") or "?")
+        header["ask"].set(str(data.get("ask1", "—")))
+        header["bid"].set(str(data.get("bid1", "—")))
+        header["last"].set(str(data.get("last", "—")))
+        meta = []
+        if data.get("ocr_confidence") is not None:
+            meta.append(f"置信度 {data['ocr_confidence']:.3f}")
+        if data.get("ocr_seconds") is not None:
+            meta.append(f"{data['ocr_seconds']}s")
+        header["meta"].set(" · ".join(meta) or "手工录入")
         problems = data.get("validation", {}).get("errors", [])
         warnings = data.get("validation", {}).get("warnings", [])
         lines = [f"合约：{data.get('contract', '?')}", f"卖一：{data.get('ask1', '?')}",
@@ -679,6 +857,11 @@ def run_form() -> int:
         if warnings:
             lines.extend(["", "提示："] + [f"  · {item}" for item in warnings])
         write_output("\n".join(lines))
+        write_ocr(str(data.get("ocr_text") or "（本次没有 OCR 原文，可能是手工录入）"))
+        low_conf = float(data.get("ocr_confidence") or 1) < float(config.get("ocr_min_confidence", 0.85))
+        banner = widgets.get("banner")
+        if banner is not None:
+            banner.configure(background=THEME["band_low"] if (low_conf or problems) else "#ffffff")
         sync_increments()
         sync_budget()
         fill_prices()
@@ -691,7 +874,7 @@ def run_form() -> int:
             try:
                 data = capture_and_recognize(form["tesseract_cmd"].get() or None)
             except Exception as exc:  # surfaced in the UI, never silent
-                root.after(0, lambda: fail(exc))
+                root.after(0, lambda error=exc: fail(error))
                 return
             root.after(0, lambda: apply_market(data))
 
@@ -759,8 +942,20 @@ def run_form() -> int:
             form["status"].set(str(exc))
             return
         last_result = result
-        form["status"].set(f"检查完成：{result['check']['status']}")
+        status = result["check"]["status"]
+        form["status"].set(f"检查完成：{status}")
+        set_badge(status, False)
+        checked_at.set(datetime.now().strftime("%H:%M:%S"))
+        version_info.set(f"v{FORM_VERSION} · 上次检查 {checked_at.get()}")
+        reasons = []
+        for item in result["check"].get("hard_blocks", []):
+            reasons.append(f"阻断：{item}")
+        for item in result["check"].get("warnings", []):
+            reasons.append(f"警告：{item}")
+        _fill_text("reasons", "\n".join(reasons) if reasons else "无阻断项，无警告")
+        update_metrics()
         write_output(summarize(result))
+        append_log(f"{checked_at.get()}  {status}  {summarize(result).replace(chr(10), ' | ')}")
 
     def save() -> None:
         if not last_result:
@@ -780,6 +975,10 @@ def run_form() -> int:
         check_result["snapshot_id"] = wh6.save_snapshot(last_result["plan"], check_result, SNAPSHOTS)
         write_output(summarize(last_result) + f"\n\n计划已保存：{plan_path}\n快照：{check_result['snapshot_id']}")
         form["status"].set(f"已保存（{last_result['check']['status']}）")
+        set_badge(last_result["check"]["status"], False)
+        if widgets.get("save") is not None:
+            widgets["save"].configure(state="disabled")
+        append_log(f"{datetime.now().strftime('%H:%M:%S')}  已保存  {plan_path.name}  {check_result['snapshot_id'][:8]}")
 
     def manual_market() -> None:
         """Type bid/ask by hand; prefill the last recognized quote."""
@@ -825,7 +1024,6 @@ def run_form() -> int:
 
     def edit_config() -> None:
         """Edit per-instrument risk parameters without touching JSON by hand."""
-        nonlocal config
         win = tk.Toplevel(root)
         win.title("品种配置（写入 trade_assistant_config.json）")
         codes = list(config["instruments"].keys())
@@ -1013,121 +1211,246 @@ def run_form() -> int:
             messagebox.showerror("历史计划", f"列表渲染失败：{exc}")
 
     # ---- layout -----------------------------------------------------------
-    # grid everywhere: pack(side="left") shrinks labels once the window is
-    # narrower than the requested width, which truncated button text.
-    pad = {"padx": 8, "pady": 5}
-    root.minsize(940, 720)
+    # Two columns: an order ticket that follows the decision order on the left,
+    # a always-visible risk panel on the right.
+    root.minsize(1040, 780)
     root.grid_columnconfigure(0, weight=1)
-    root.grid_rowconfigure(12, weight=1)
+    root.grid_rowconfigure(1, weight=1)
 
-    ttk.Label(root, textvariable=market_var, font=("Microsoft YaHei UI", 11, "bold")).grid(row=0, column=0, sticky="w", **pad)
+    style = ttk.Style(root)
+    try:
+        style.theme_use("vista")
+    except tk.TclError:
+        pass
+    style.configure("Segment.Toolbutton", font=THEME["font_title"], padding=(16, 8))
+    style.configure("Contract.TLabel", font=THEME["font_title"])
+    style.configure("Price.TLabel", font=THEME["font_price"])
+    style.configure("Section.TLabelframe.Label", font=THEME["font_body"])
 
-    direction_row = ttk.Frame(root)
-    direction_row.grid(row=1, column=0, sticky="w", **pad)
-    ttk.Label(direction_row, text="方向").grid(row=0, column=0, sticky="w")
-    for index, (label, value) in enumerate(DIRECTIONS, start=1):
-        option(direction_row, label, value, form["direction"], fill_prices).grid(
-            row=0, column=index, sticky="w", padx=8)
-    ttk.Checkbutton(direction_row, text="加仓", width=option_width("加仓"),
-                    variable=form["is_add_on"]).grid(row=0, column=3, sticky="w", padx=20)
+    # --- header (fixed) ---------------------------------------------------
+    banner = tk.Frame(root, background="#ffffff")
+    banner.grid(row=0, column=0, sticky="ew")
+    widgets["banner"] = banner
+    banner.grid_columnconfigure(3, weight=1)
 
-    modes = ttk.Frame(root)
-    modes.grid(row=2, column=0, sticky="w", **pad)
-    ttk.Label(modes, text="价格").grid(row=0, column=0, sticky="w")
-    for index, (label, value) in enumerate(PRICE_MODES, start=1):
-        option(modes, label, value, form["price_mode"], fill_prices).grid(
-            row=0, column=index, sticky="w", padx=8)
+    ttk.Label(banner, textvariable=header["contract"], style="Contract.TLabel").grid(
+        row=0, column=0, sticky="w", padx=(12, 16), pady=10)
 
-    nums = ttk.Frame(root)
-    nums.grid(row=3, column=0, sticky="w", **pad)
-    for column, (label, key, start, end, width) in enumerate((
-        ("手数", "size", 1, 50, 5),
-        ("止损跳数", "stop_ticks", 1, 200, 6),
-        ("止盈跳数", "take_ticks", 1, 400, 6),
+    quote = ttk.Frame(banner)
+    quote.grid(row=0, column=1, sticky="w")
+    for column, (label, key) in enumerate((("卖一", "ask"), ("买一", "bid"), ("最新", "last"))):
+        ttk.Label(quote, text=label, foreground=THEME["muted"]).grid(
+            row=0, column=column * 2, sticky="e", padx=(0, 4))
+        ttk.Label(quote, textvariable=header[key], style="Price.TLabel").grid(
+            row=0, column=column * 2 + 1, sticky="w", padx=(0, 18))
+
+    ttk.Label(banner, textvariable=header["meta"], foreground=THEME["muted"]).grid(
+        row=0, column=3, sticky="e", padx=(0, 12))
+
+    header_buttons = ttk.Frame(banner)
+    header_buttons.grid(row=0, column=4, sticky="e", padx=(0, 12))
+    for index, (label, command) in enumerate((
+        ("刷新行情 F5", refresh), ("手工填价", manual_market),
+        ("品种配置", edit_config), ("历史计划", open_history),
     )):
-        ttk.Label(nums, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 20, 4))
-        tick_spin = ttk.Spinbox(nums, from_=start, to=end, width=width, textvariable=form[key],
-                                command=fill_prices)
-        tick_spin.grid(row=0, column=column * 2 + 1, sticky="w")
-        ticks_spins[key] = tick_spin
-    ttk.Label(nums, text="价格调整步长（跳）").grid(row=0, column=6, sticky="w", padx=(20, 4))
-    step_box = ttk.Combobox(nums, textvariable=form["step_ticks"], values=STEP_CHOICES,
+        ttk.Button(header_buttons, text=label, command=command).grid(row=0, column=index, padx=(6, 0))
+
+    # --- body: ticket + risk panel ---------------------------------------
+    body = ttk.Frame(root, padding=(12, 0))
+    body.grid(row=1, column=0, sticky="nsew")
+    body.grid_columnconfigure(0, weight=3, uniform="cols")
+    body.grid_columnconfigure(1, weight=2, uniform="cols")
+    body.grid_rowconfigure(0, weight=1)
+
+    ticket = ttk.Frame(body)
+    ticket.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+    ticket.grid_columnconfigure(0, weight=1)
+
+    # ① 方向
+    sec_dir = ttk.LabelFrame(ticket, text="① 方向", padding=8)
+    sec_dir.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    for index, (label, value) in enumerate(DIRECTIONS):
+        ttk.Radiobutton(sec_dir, text=label, value=value, variable=form["direction"],
+                        command=fill_prices, style="Segment.Toolbutton", width=6).grid(
+            row=0, column=index, sticky="w", padx=(0, 10))
+    ttk.Checkbutton(sec_dir, text="加仓", variable=form["is_add_on"]).grid(
+        row=0, column=2, sticky="w", padx=(18, 0))
+
+    # ② 入场
+    sec_entry = ttk.LabelFrame(ticket, text="② 入场", padding=8)
+    sec_entry.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    for index, (label, value) in enumerate(PRICE_MODES):
+        option(sec_entry, label, value, form["price_mode"], fill_prices).grid(
+            row=0, column=index, sticky="w", padx=(0, 6))
+    entry_row = ttk.Frame(sec_entry)
+    entry_row.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+    ttk.Label(entry_row, text="入场价").pack(side="left")
+    entry_spin = ttk.Spinbox(entry_row, textvariable=form["entry_price"], width=12,
+                             from_=0, to=1000000, increment=1)
+    entry_spin.pack(side="left", padx=(6, 18))
+    price_spins["entry_price"] = entry_spin
+    ttk.Label(entry_row, text="调整步长（跳）").pack(side="left")
+    step_box = ttk.Combobox(entry_row, textvariable=form["step_ticks"], values=STEP_CHOICES,
                             width=4, state="readonly")
-    step_box.grid(row=0, column=7, sticky="w")
+    step_box.pack(side="left", padx=6)
     step_box.bind("<<ComboboxSelected>>", lambda _event: (sync_increments(), fill_prices()))
 
-    risk_row = ttk.Frame(root)
-    risk_row.grid(row=4, column=0, sticky="w", **pad)
-    ttk.Checkbutton(risk_row, text="止盈 = 止损 ×", variable=form["link_take"],
-                    command=on_link_toggle).grid(row=0, column=0, sticky="w")
-    rr_box = ttk.Combobox(risk_row, textvariable=form["rr_ratio"], values=("1", "1.5", "2", "3", "4"), width=5)
-    rr_box.grid(row=0, column=1, sticky="w", padx=4)
+    # ③ 止损
+    sec_stop = ttk.LabelFrame(ticket, text="③ 止损（决定风险）", padding=8)
+    sec_stop.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+    ttk.Label(sec_stop, text="跳数").grid(row=0, column=0, sticky="w")
+    stop_ticks_spin = ttk.Spinbox(sec_stop, from_=1, to=200, width=6, textvariable=form["stop_ticks"],
+                                  command=fill_prices)
+    stop_ticks_spin.grid(row=0, column=1, sticky="w", padx=(6, 20))
+    ticks_spins["stop_ticks"] = stop_ticks_spin
+    ttk.Label(sec_stop, text="价格").grid(row=0, column=2, sticky="w")
+    stop_price_spin = ttk.Spinbox(sec_stop, textvariable=form["stop_loss"], width=12,
+                                  from_=0, to=1000000, increment=1)
+    stop_price_spin.grid(row=0, column=3, sticky="w", padx=(6, 0))
+    price_spins["stop_loss"] = stop_price_spin
+
+    # ④ 手数
+    sec_size = ttk.LabelFrame(ticket, text="④ 手数（按 1R 推导）", padding=8)
+    sec_size.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+    budget_row = ttk.Frame(sec_size)
+    budget_row.grid(row=0, column=0, sticky="w")
+    ttk.Checkbutton(budget_row, text="1R = 单笔上限", variable=form["budget_from_limit"],
+                    command=lambda: (sync_budget(), update_sizing())).pack(side="left")
+    ttk.Label(budget_row, text="1R 金额").pack(side="left", padx=(14, 4))
+    budget_widget = ttk.Spinbox(budget_row, textvariable=form["risk_budget"], width=8,
+                                from_=0, to=1000000, increment=50, command=update_sizing)
+    budget_widget.pack(side="left")
+    budget_spin["widget"] = budget_widget
+    form["risk_budget"].trace_add("write", lambda *_args: update_sizing())
+    ttk.Button(budget_row, textvariable=apply_text, command=apply_sizing).pack(side="left", padx=(12, 0))
+
+    ttk.Label(sec_size, textvariable=sizing_text, foreground=THEME["ok"]).grid(
+        row=1, column=0, sticky="w", pady=(6, 4))
+    size_row = ttk.Frame(sec_size)
+    size_row.grid(row=2, column=0, sticky="w")
+    ttk.Label(size_row, text="手数").pack(side="left")
+    size_spin = ttk.Spinbox(size_row, from_=1, to=50, width=6, textvariable=form["size"],
+                            command=fill_prices)
+    size_spin.pack(side="left", padx=(6, 0))
+    ticks_spins["size"] = size_spin
+
+    # ⑤ 止盈
+    sec_take = ttk.LabelFrame(ticket, text="⑤ 止盈", padding=8)
+    sec_take.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+    take_row = ttk.Frame(sec_take)
+    take_row.grid(row=0, column=0, sticky="w")
+    ttk.Checkbutton(take_row, text="止盈 = 止损 ×", variable=form["link_take"],
+                    command=on_link_toggle).pack(side="left")
+    rr_box = ttk.Combobox(take_row, textvariable=form["rr_ratio"], values=("1", "1.5", "2", "3", "4"),
+                          width=5)
+    rr_box.pack(side="left", padx=4)
     for event in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
         rr_box.bind(event, lambda _event: fill_prices())
     rr_state["box"] = rr_box
-    ttk.Label(risk_row, text="倍（x > 0）").grid(row=0, column=2, sticky="w")
-    ttk.Label(risk_row, textvariable=rr_preview, foreground="#555").grid(row=0, column=3, sticky="w", padx=(16, 0))
+    ttk.Label(take_row, text="倍（x > 0）").pack(side="left", padx=(4, 12))
+    ttk.Label(take_row, textvariable=rr_preview, foreground=THEME["muted"]).pack(side="left")
 
-    sizing_row = ttk.Frame(root)
-    sizing_row.grid(row=5, column=0, sticky="w", **pad)
-    ttk.Checkbutton(sizing_row, text="1R = 单笔上限", variable=form["budget_from_limit"],
-                    command=lambda: (sync_budget(), update_sizing())).grid(row=0, column=0, sticky="w")
-    ttk.Label(sizing_row, text="1R 金额（元）").grid(row=0, column=1, sticky="w", padx=(12, 0))
-    spin = ttk.Spinbox(sizing_row, textvariable=form["risk_budget"], width=8, from_=0, to=1000000,
-                       increment=50, command=update_sizing)
-    spin.grid(row=0, column=2, sticky="w", padx=4)
-    budget_spin["widget"] = spin
-    form["risk_budget"].trace_add("write", lambda *_args: update_sizing())
-    ttk.Button(sizing_row, text="按 R 套用手数", command=apply_sizing,
-               width=14).grid(row=0, column=3, sticky="w", padx=8)
-    ttk.Label(sizing_row, textvariable=sizing_text, foreground="#0a5").grid(
-        row=0, column=4, sticky="w", padx=8)
+    take_fields = ttk.Frame(sec_take)
+    take_fields.grid(row=1, column=0, sticky="w", pady=(6, 0))
+    ttk.Label(take_fields, text="跳数").pack(side="left")
+    take_ticks_spin = ttk.Spinbox(take_fields, from_=1, to=400, width=6, textvariable=form["take_ticks"],
+                                  command=fill_prices)
+    take_ticks_spin.pack(side="left", padx=(6, 20))
+    ticks_spins["take_ticks"] = take_ticks_spin
+    ttk.Label(take_fields, text="价格").pack(side="left")
+    take_price_spin = ttk.Spinbox(take_fields, textvariable=form["take_profit"], width=12,
+                                  from_=0, to=1000000, increment=1)
+    take_price_spin.pack(side="left", padx=(6, 0))
+    price_spins["take_profit"] = take_price_spin
 
-    prices = ttk.Frame(root)
-    prices.grid(row=6, column=0, sticky="w", **pad)
-    for column, (label, key) in enumerate((("入场", "entry_price"), ("止损", "stop_loss"), ("止盈", "take_profit"))):
-        ttk.Label(prices, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 20, 4))
-        spin = ttk.Spinbox(prices, textvariable=form[key], width=11, from_=0, to=1000000, increment=1)
-        spin.grid(row=0, column=column * 2 + 1, sticky="w")
-        price_spins[key] = spin
-
-    smc = ttk.LabelFrame(root, text="SMC 标签")
-    smc.grid(row=7, column=0, sticky="ew", **pad)
+    # ⑥ 标签
+    sec_tags = ttk.LabelFrame(ticket, text="⑥ 标签", padding=8)
+    sec_tags.grid(row=5, column=0, sticky="ew")
     for column in range(4):
-        smc.grid_columnconfigure(column, weight=1, uniform="smc")
+        sec_tags.grid_columnconfigure(column, weight=1, uniform="smc")
     for index, tag in enumerate(smc_tags):
-        option(smc, tag, tag, form["smc_tag"]).grid(
-            row=index // 4, column=index % 4, sticky="w", padx=6, pady=3)
-    custom_row = index // 4 + 1 if smc_tags else 0
-    ttk.Label(smc, text="自定义").grid(row=custom_row, column=0, sticky="w", padx=6, pady=(6, 4))
-    ttk.Entry(smc, textvariable=form["smc_custom"], width=30).grid(
-        row=custom_row, column=1, columnspan=3, sticky="w", padx=6, pady=(6, 4))
+        option(sec_tags, tag, tag, form["smc_tag"]).grid(
+            row=index // 4, column=index % 4, sticky="w", padx=4, pady=2)
+    tag_row = index // 4 + 1 if smc_tags else 0
+    ttk.Label(sec_tags, text="自定义").grid(row=tag_row, column=0, sticky="w", padx=4, pady=(6, 2))
+    ttk.Entry(sec_tags, textvariable=form["smc_custom"], width=26).grid(
+        row=tag_row, column=1, columnspan=3, sticky="w", padx=4, pady=(6, 2))
+    htf_row = tag_row + 1
+    ttk.Label(sec_tags, text="HTF").grid(row=htf_row, column=0, sticky="w", padx=4, pady=(4, 0))
+    htf_frame = ttk.Frame(sec_tags)
+    htf_frame.grid(row=htf_row, column=1, columnspan=3, sticky="w", pady=(4, 0))
+    for label, value in HTF_CHOICES:
+        option(htf_frame, label, value, form["htf_bias"]).pack(side="left", padx=(0, 6))
 
-    htf = ttk.LabelFrame(root, text="HTF Bias")
-    htf.grid(row=8, column=0, sticky="ew", **pad)
-    for column in range(4):
-        htf.grid_columnconfigure(column, weight=1, uniform="htf")
-    for index, (label, value) in enumerate(HTF_CHOICES):
-        option(htf, label, value, form["htf_bias"]).grid(
-            row=0, column=index, sticky="w", padx=6, pady=4)
+    # --- right: risk panel ------------------------------------------------
+    panel = ttk.Frame(body)
+    panel.grid(row=0, column=1, sticky="nsew")
+    panel.grid_columnconfigure(0, weight=1)
+    panel.grid_rowconfigure(3, weight=1)
 
-    tess = ttk.Frame(root)
-    tess.grid(row=9, column=0, sticky="ew", **pad)
-    ttk.Label(tess, text="Tesseract").grid(row=0, column=0, sticky="w")
-    ttk.Entry(tess, textvariable=form["tesseract_cmd"]).grid(row=0, column=1, sticky="ew", padx=6)
-    tess.grid_columnconfigure(1, weight=1)
+    badge = tk.Label(panel, textvariable=badge_text, font=THEME["font_badge"],
+                     foreground=THEME["muted"], background="#f2f2f2", padx=10, pady=12, anchor="center")
+    badge.grid(row=0, column=0, sticky="ew")
+    widgets["badge"] = badge
 
-    actions = ttk.Frame(root)
-    actions.grid(row=10, column=0, sticky="w", **pad)
-    for column, (label, command) in enumerate((
-        ("刷新行情", refresh), ("手工填价", manual_market),
-        ("检查计划", check), ("保存计划", save),
-        ("品种配置", edit_config), ("历史计划", open_history),
-    )):
-        ttk.Button(actions, text=label, command=command, width=12).grid(row=0, column=column, padx=6)
+    metric_frame = ttk.LabelFrame(panel, text="风险", padding=8)
+    metric_frame.grid(row=1, column=0, sticky="ew", pady=8)
+    metric_frame.grid_columnconfigure(1, weight=1)
+    metric_rows = (("每手风险", "per_lot"), ("计划风险", "total"),
+                   ("单笔上限", "limit"), ("剩余预算", "remain"))
+    for row, (label, key) in enumerate(metric_rows):
+        ttk.Label(metric_frame, text=label, foreground=THEME["muted"]).grid(
+            row=row, column=0, sticky="w", pady=1)
+        ttk.Label(metric_frame, textvariable=metrics[key], font=("Consolas", 11, "bold")).grid(
+            row=row, column=1, sticky="e", pady=1)
+    ttk.Label(metric_frame, text="最多可承受", foreground=THEME["muted"]).grid(
+        row=len(metric_rows), column=0, sticky="w", pady=(6, 0))
+    ttk.Label(metric_frame, textvariable=metrics["cap"]).grid(
+        row=len(metric_rows), column=1, sticky="e", pady=(6, 0))
 
-    ttk.Label(root, textvariable=form["status"], foreground="#333").grid(row=11, column=0, sticky="w", **pad)
-    output.grid(row=12, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    bar_frame = ttk.Frame(panel)
+    bar_frame.grid(row=2, column=0, sticky="ew")
+    ttk.Progressbar(bar_frame, maximum=100, variable=ratio_var).pack(fill="x")
+    ttk.Label(bar_frame, textvariable=ratio_note, foreground=THEME["muted"]).pack(
+        anchor="w", pady=(2, 0))
+
+    reasons_frame = ttk.LabelFrame(panel, text="检查发现", padding=6)
+    reasons_frame.grid(row=3, column=0, sticky="nsew", pady=8)
+    reasons_text = tk.Text(reasons_frame, height=6, wrap="word", state="disabled", relief="flat")
+    reasons_text.pack(fill="both", expand=True)
+    widgets["reasons"] = reasons_text
+    _fill_text("reasons", "尚未检查")
+
+    action_frame = ttk.Frame(panel)
+    action_frame.grid(row=4, column=0, sticky="ew")
+    ttk.Button(action_frame, text="检查计划  Ctrl+Enter", command=check).pack(fill="x", pady=(0, 6))
+    save_button = ttk.Button(action_frame, text="保存计划  Ctrl+S", command=save, state="disabled")
+    save_button.pack(fill="x")
+    widgets["save"] = save_button
+
+    # --- status bar + log tabs -------------------------------------------
+    status_bar = ttk.Frame(root, padding=(12, 4))
+    status_bar.grid(row=2, column=0, sticky="ew")
+    status_bar.grid_columnconfigure(0, weight=1)
+    ttk.Label(status_bar, textvariable=form["status"]).grid(row=0, column=0, sticky="w")
+    ttk.Label(status_bar, textvariable=version_info, foreground=THEME["muted"]).grid(
+        row=0, column=1, sticky="e")
+
+    book = ttk.Notebook(root)
+    book.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+    for title, key in (("行情详情", "detail"), ("OCR 原文", "ocr"), ("本次检查", "log")):
+        tab = ttk.Frame(book)
+        book.add(tab, text=title)
+        view = tk.Text(tab, height=7, wrap="word", state="disabled", relief="flat")
+        view.pack(fill="both", expand=True)
+        widgets[key] = view
+
+    # --- keyboard shortcuts ----------------------------------------------
+    root.bind("<F5>", lambda _event: refresh())
+    root.bind("<Control-Return>", lambda _event: check())
+    root.bind("<Control-s>", lambda _event: save() if str(widgets["save"].cget("state")) == "normal" else None)
+    root.bind("<Alt-Key-1>", lambda _event: (form["direction"].set("long"), fill_prices()))
+    root.bind("<Alt-Key-2>", lambda _event: (form["direction"].set("short"), fill_prices()))
 
     def on_close() -> None:
         save_state({"tesseract_cmd": form["tesseract_cmd"].get(),
@@ -1142,6 +1465,8 @@ def run_form() -> int:
         ticks_spins[key].bind("<FocusOut>", on_ticks_commit)
         ticks_spins[key].bind("<Return>", on_ticks_commit)
 
+    set_badge(None, True)
+    update_metrics()
     on_link_toggle()
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
