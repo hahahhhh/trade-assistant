@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.13"
+FORM_VERSION = "1.14"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -724,6 +724,15 @@ def run_form() -> int:
             "is_add_on": bool(form["is_add_on"].get()),
         }
 
+    def on_price_commit(_event: Any = None) -> None:
+        """Typing a price then leaving the box updates the tick count."""
+        refresh_ticks_from_prices()
+        fill_prices()
+
+    def on_ticks_commit(_event: Any = None) -> None:
+        """Typing a tick count then leaving the box updates the prices."""
+        fill_prices()
+
     def refresh_ticks_from_prices() -> None:
         """Keep the tick boxes truthful after the price boxes are edited directly."""
         try:
@@ -742,7 +751,6 @@ def run_form() -> int:
 
     def check() -> None:
         nonlocal last_result
-        refresh_ticks_from_prices()
         if form["link_take"].get():
             fill_prices()
         try:
@@ -1126,6 +1134,13 @@ def run_form() -> int:
                     "risk_budget": form["risk_budget"].get(),
                     "budget_from_limit": bool(form["budget_from_limit"].get())})
         root.destroy()
+
+    for key in ("stop_loss", "take_profit"):
+        price_spins[key].bind("<FocusOut>", on_price_commit)
+        price_spins[key].bind("<Return>", on_price_commit)
+    for key in ("stop_ticks", "take_ticks"):
+        ticks_spins[key].bind("<FocusOut>", on_ticks_commit)
+        ticks_spins[key].bind("<Return>", on_ticks_commit)
 
     on_link_toggle()
     root.protocol("WM_DELETE_WINDOW", on_close)
