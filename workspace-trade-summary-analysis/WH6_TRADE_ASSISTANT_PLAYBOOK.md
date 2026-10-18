@@ -178,7 +178,51 @@ Ctrl+C
 
 ## 7. 交易前检查的最小流程
 
-当前命令行版本需要一个交易计划 JSON。示例：
+### 推荐：一条命令完成 识别 → 定价 → 风险检查
+
+```powershell
+python workspace-trade-summary-analysis\wh6_screen.py `
+  --capture `
+  --capture-mode app `
+  --save-capture C:\wh6_data\last_capture.png `
+  --ocr-effort auto `
+  --plan-out C:\wh6_data\plan.json `
+  --plan-check `
+  --direction long `
+  --size 1 `
+  --price-mode opponent `
+  --stop-loss 4863 `
+  --take-profit 4950 `
+  --smc-tag FVG `
+  --htf-bias long `
+  --snapshots C:\wh6_data\pre_trade_snapshots.jsonl `
+  --tesseract-cmd "C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
+这条命令会：
+
+1. 捕获 WH6 应用窗口并 OCR 右侧行情栏；
+2. 把识别到的买一/卖一/最新价写入 `plan.json`；
+3. 用 `--direction` / `--price-mode` 解析入场价；
+4. 计算跳数与人民币风险，与品种单笔上限比较；
+5. 输出 `PASS` / `WARN` / `REJECT`；
+6. 把计划、检查结果和 OCR 来源写入快照 JSONL。
+
+注意 `contract` 会被规范化：WH6 显示的 `PVC2701` 在计划中写成 `V2701`（风险配置按品种 `V` 匹配），原始标签保留在 `contract_label` 字段，便于回溯。
+
+### OCR 速度档位
+
+| `--ocr-effort` | 最坏 Tesseract 调用次数 | 适用 |
+|---|---:|---|
+| `fast` | 1 | 光线稳定、只想快速取盘口 |
+| `auto`（默认） | 7，通常 1 | 日常使用；命中即停 |
+| `thorough` | 11 | 识别失败时排查 |
+
+`auto` 会先只识别右侧行情栏的灰度图；四个字段齐全且置信度达标时立即停止，不再跑其他组合。
+
+### 手工方式：先写计划 JSON
+
+如果不用自动生成，也可以手写计划并单独检查：
 
 ```json
 {

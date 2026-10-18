@@ -81,6 +81,36 @@ class WH6Tests(unittest.TestCase):
         self.assertIn('app', ('app', 'window', 'monitor'))
         self.assertEqual(wh6.APP_NAME, 'wh6')
 
+    def test_ocr_effort_budget(self):
+        for effort in ('fast', 'auto', 'thorough'):
+            tiers = wh6._ocr_tiers(effort, None)
+            self.assertEqual(tiers[0][2:], ('gray', (11,)))
+        self.assertEqual(sum(len(t[3]) for t in wh6._ocr_tiers('fast', None)), 1)
+        self.assertLessEqual(sum(len(t[3]) for t in wh6._ocr_tiers('auto', None)), 7)
+        with self.assertRaises(ValueError):
+            wh6.ocr_quote_image(Path('missing.png'), effort='bogus')
+
+    def test_plan_draft_canonicalizes_contract_and_passes(self):
+        recognized = {
+            'variety': 'V', 'contract': 'PVC2701',
+            'bid1': 4902.0, 'ask1': 4903.0, 'last': 4903.0,
+            'ocr_confidence': 0.86, 'source': 'wh6_ocr',
+        }
+        plan = wh6.build_plan_draft(
+            recognized, direction='long', stop_loss=4863,
+            smc_tag='FVG', htf_bias='long',
+        )
+        self.assertEqual(plan['contract'], 'V2701')
+        self.assertEqual(plan['contract_label'], 'PVC2701')
+        result = wh6.check_plan(plan, config)
+        self.assertEqual(result['status'], 'PASS')
+        self.assertEqual(result['risk']['total_risk_rmb'], 200.0)
+
+    def test_plan_draft_without_direction_is_rejected(self):
+        recognized = {'variety': 'V', 'contract': 'PVC2701', 'bid1': 4902.0, 'ask1': 4903.0, 'last': 4903.0}
+        plan = wh6.build_plan_draft(recognized, stop_loss=4863, smc_tag='FVG', htf_bias='long')
+        self.assertEqual(wh6.check_plan(plan, config)['status'], 'REJECT')
+
 
 if __name__ == '__main__':
     unittest.main()

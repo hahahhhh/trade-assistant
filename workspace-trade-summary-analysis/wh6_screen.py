@@ -16,14 +16,14 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from trade_assistant import load_config
+    from trade_assistant import load_config, check_plan, save_snapshot
 except ModuleNotFoundError:  # direct file import from the test runner
     import importlib.util
     _spec = importlib.util.spec_from_file_location("trade_assistant", Path(__file__).with_name("trade_assistant.py"))
     _module = importlib.util.module_from_spec(_spec)
     assert _spec.loader is not None
     _spec.loader.exec_module(_module)
-    load_config = _module.load_config
+    load_config, check_plan, save_snapshot = _module.load_config, _module.check_plan, _module.save_snapshot
 
 PROCESS_NAME = "mytrader_spqh.exe"
 APP_NAME = "wh6"
@@ -276,79 +276,215 @@ def capture_windows_process(process_name: str = PROCESS_NAME, interval: float = 
     return captures
 
 
-def ocr_image(image_path: Path, lang: str = "chi_sim+eng", region: tuple[int, int, int, int] | None = None) -> dict[str, Any]:
+QUOTE_FIELDS = ("variety", "bid1", "ask1", "last")
+
+
+def _quote_fields_found(parsed: dict[str, Any]) -> int:
+    return sum(parsed.get(key) is not None for key in QUOTE_FIELDS)
+
+
+def _quote_score(parsed: dict[str, Any]) -> tuple[int, float]:
+    return _quote_fields_found(parsed), float(parsed.get("ocr_confidence", 0) or 0)
+
+
+def _render_variant(image: Any, variant_name: str) -> Any:
+    from PIL import ImageOps, ImageEnhance, ImageFilter  # type: ignore
+    if variant_name == "gray":
+        variant = ImageOps.grayscale(image)
+    elif variant_name == "contrast":
+        variant = ImageEnhance.Contrast(ImageOps.grayscale(image)).enhance(3.0)
+    elif variant_name == "upscaled":
+        gray = ImageOps.grayscale(image)
+        variant = ImageEnhance.Contrast(gray.resize((gray.width * 2, gray.height * 2))).enhance(3.0)
+    elif variant_name == "red_channel":
+        variant = image.getchannel("R")
+    elif variant_name == "green_channel":
+        variant = image.getchannel("G")
+    else:
+        raise ValueError(f"Unknown OCR variant: {variant_name}")
+    return variant.filter(ImageFilter.SHARPEN)
+
+
+def _ocr_attempt(image: Any, lang: str, variant_name: str, psm: int) -> dict[str, Any]:
+    """Run one Tesseract call and return parsed quote fields plus evidence."""
+    import pytesseract  # type: ignore
+    variant = _render_variant(image, variant_name)
+    data = pytesseract.image_to_data(variant, lang=lang, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
+    words, confidences = [], []
+    for word, conf in zip(data["text"], data["conf"]):
+        word = word.strip()
+        try:
+            score = float(conf)
+        except (TypeError, ValueError):
+            score = -1
+        if word:
+            words.append(word)
+            if score >= 0:
+                confidences.append(score / 100)
+    text = " ".join(words)
+    confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    parsed = parse_wh6_ocr(text, confidence)
+    parsed["ocr_text"] = text
+    parsed["ocr_variant"] = variant_name
+    parsed["ocr_psm"] = psm
+    parsed["ocr_fields_found"] = _quote_fields_found(parsed)
+    return parsed
+
+
+def _quote_panel_box(width: int, height: int) -> tuple[int, int, int, int]:
+    """Right-hand WH6 quote panel: labels, bid/ask, last, daily statistics."""
+    return (int(width * 0.80), 0, width, max(1, int(height * 0.55)))
+
+
+def _ocr_tiers(
+    effort: str,
+    region: tuple[int, int, int, int] | None,
+    width: int = 2262,
+    height: int = 1162,
+) -> list[tuple[str, tuple[int, int, int, int] | None, str, tuple[int, ...]]]:
+    """Ordered OCR passes: cheapest useful pass first, escalation last."""
+    panel = region or _quote_panel_box(width, height)
+    tiers: list[tuple[str, tuple[int, int, int, int] | None, str, tuple[int, ...]]] = [
+        ("panel", panel, "gray", (11,)),
+    ]
+    if effort == "fast":
+        return tiers
+    tiers += [
+        ("panel", panel, "gray", (6,)),
+        ("panel", panel, "contrast", (11,)),
+    ]
+    if region is None:
+        tiers.append(("full", None, "gray", (11, 6)))
+    tiers += [
+        ("panel", panel, "red_channel", (11,)),
+        ("panel", panel, "green_channel", (11,)),
+    ]
+    if effort == "thorough":
+        tiers += [("panel", panel, "upscaled", (6, 11)), ("full", None, "contrast", (6, 11))]
+    return tiers
+
+
+def ocr_quote_image(
+    image_path: Path,
+    lang: str = "chi_sim+eng",
+    region: tuple[int, int, int, int] | None = None,
+    effort: str = "auto",
+    stop_confidence: float = 0.80,
+) -> dict[str, Any]:
+    """Tiered WH6 OCR: one cheap pass first, escalating only on failure.
+
+    ``effort``:
+      fast     - a single quote-panel grayscale pass (~1 Tesseract call)
+      auto     - add psm/contrast/full-window passes only while fields are missing
+      thorough - legacy behaviour: every variant and page mode
+    """
+    if effort not in ("fast", "auto", "thorough"):
+        raise ValueError("effort must be fast, auto, or thorough")
     try:
-        from PIL import Image, ImageOps, ImageEnhance, ImageFilter  # type: ignore
+        from PIL import Image  # type: ignore
         import pytesseract  # type: ignore
     except ImportError as exc:
         raise RuntimeError("Install Pillow and pytesseract, plus Tesseract OCR with chi_sim language data") from exc
     image = Image.open(image_path).convert("RGB")
-    if region:
-        image = image.crop(region)
-    # WH6 uses colored text on black. Run OCR over several high-contrast
-    # variants instead of assuming grayscale preserves the useful signal.
-    gray = ImageOps.grayscale(image)
-    variants = [
-        ("gray", gray),
-        ("contrast", ImageEnhance.Contrast(gray).enhance(3.0)),
-        ("upscaled", ImageEnhance.Contrast(gray.resize((gray.width * 2, gray.height * 2))).enhance(3.0)),
-        ("red_channel", image.getchannel("R")),
-        ("green_channel", image.getchannel("G")),
-    ]
-    attempts = []
-    for variant_name, variant in variants:
-        variant = variant.filter(ImageFilter.SHARPEN)
-        for psm in (6, 11, 12):
-            data = pytesseract.image_to_data(variant, lang=lang, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
-            words, confidences = [], []
-            for word, conf in zip(data["text"], data["conf"]):
-                word = word.strip()
-                try: score = float(conf)
-                except (TypeError, ValueError): score = -1
-                if word:
-                    words.append(word)
-                    if score >= 0: confidences.append(score / 100)
-            text = " ".join(words)
-            confidence = sum(confidences) / len(confidences) if confidences else 0.0
-            parsed = parse_wh6_ocr(text, confidence)
-            field_count = sum(parsed.get(key) is not None for key in ("variety", "bid1", "ask1", "last"))
-            # Prefer actual fields over generic OCR confidence: random window
-            # text must not beat a weak but useful quote-panel read.
-            attempts.append((field_count, confidence, variant_name, psm, text, parsed))
-    field_count, confidence, variant_name, psm, text, result = max(attempts, key=lambda item: (item[0], item[1]))
-    result["ocr_text"] = text
-    result["ocr_variant"] = variant_name
-    result["ocr_psm"] = psm
-    result["ocr_fields_found"] = field_count
-    result["image_path"] = str(image_path)
-    result["image_sha256"] = hashlib.sha256(image_path.read_bytes()).hexdigest()
-    result["captured_at"] = datetime.now(timezone.utc).isoformat()
-    if region:
-        result["ocr_region"] = list(region)
-    return result
+    width, height = image.size
+    panel = region or _quote_panel_box(width, height)
+    tiers = _ocr_tiers(effort, region, width, height)
+
+    best: dict[str, Any] | None = None
+    best_score = (-1, -1.0)
+    calls = 0
+    for crop_name, box, variant_name, psms in tiers:
+        working = image if box is None else image.crop(box)
+        for psm in psms:
+            calls += 1
+            parsed = _ocr_attempt(working, lang, variant_name, psm)
+            parsed["ocr_tier"] = crop_name
+            parsed["ocr_calls"] = calls
+            score = _quote_score(parsed)
+            if score > best_score:
+                best = parsed
+                best_score = score
+            if score[0] >= len(QUOTE_FIELDS) and score[1] >= stop_confidence:
+                break
+        if best_score[0] >= len(QUOTE_FIELDS) and best_score[1] >= stop_confidence:
+            break
+
+    assert best is not None
+    best["ocr_effort"] = effort
+    best["ocr_calls"] = calls
+    best["image_path"] = str(image_path)
+    best["image_sha256"] = hashlib.sha256(image_path.read_bytes()).hexdigest()
+    best["captured_at"] = datetime.now(timezone.utc).isoformat()
+    best["ocr_region"] = list(region or panel)
+    return best
 
 
-def ocr_image_best(image_path: Path, lang: str, region: tuple[int, int, int, int] | None = None) -> dict[str, Any]:
-    """Try full image and WH6 right quote-panel crop; preserve best OCR evidence."""
-    if region is not None:
-        return ocr_image(image_path, lang, region)
-    results = [ocr_image(image_path, lang)]
-    try:
-        from PIL import Image  # type: ignore
-        with Image.open(image_path) as image:
-            width, height = image.size
-        # WH6 quote panel occupies the far-right top portion in the supplied layout.
-        x0 = int(width * 0.82)
-        y1 = int(height * 0.44)
-        crop = (x0, 0, width, y1)
-        if x0 > 0 and y1 > 0:
-            results.append(ocr_image(image_path, lang, crop))
-    except Exception:
-        pass
-    def score(item: dict[str, Any]) -> tuple[int, float]:
-        fields = sum(item.get(key) is not None for key in ("variety", "bid1", "ask1", "last"))
-        return fields, float(item.get("ocr_confidence", 0))
-    return max(results, key=score)
+def ocr_image_best(
+    image_path: Path,
+    lang: str,
+    region: tuple[int, int, int, int] | None = None,
+    effort: str = "auto",
+) -> dict[str, Any]:
+    """Backwards-compatible wrapper around :func:`ocr_quote_image`."""
+    return ocr_quote_image(image_path, lang, region, effort)
+
+
+def build_plan_draft(
+    recognized: dict[str, Any],
+    *,
+    direction: str | None = None,
+    size: int = 1,
+    price_mode: str = "opponent",
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    smc_tag: str | None = None,
+    htf_bias: str | None = None,
+    is_add_on: bool = False,
+    entry_price: float | None = None,
+    offset_ticks: int | None = None,
+) -> dict[str, Any]:
+    """Turn recognized market data into a reviewable trade-plan draft."""
+    market = {
+        key: recognized.get(key)
+        for key in ("bid1", "ask1", "last")
+        if recognized.get(key) is not None
+    }
+    if recognized.get("ocr_confidence") is not None:
+        market["ocr_confidence"] = recognized["ocr_confidence"]
+    # WH6 renders PVC contracts as `PVC2701`; the risk engine matches on the
+    # variety code, so canonicalize to V2701 and keep the label for traceability.
+    variety = recognized.get("variety")
+    label = recognized.get("contract")
+    digits = re.sub(r"\D", "", str(label or ""))
+    contract = f"{variety}{digits}" if variety and digits else label
+    plan: dict[str, Any] = {
+        "variety": variety,
+        "contract": contract,
+        "contract_label": label,
+        "direction": direction,
+        "size": int(size),
+        "price_mode": price_mode,
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "smc_tag": smc_tag,
+        "htf_bias": htf_bias,
+        "is_add_on": bool(is_add_on),
+        "market": market,
+        "market_provenance": {
+            "source": recognized.get("source"),
+            "captured_at": recognized.get("captured_at"),
+            "ocr_confidence": recognized.get("ocr_confidence"),
+            "ocr_variant": recognized.get("ocr_variant"),
+            "ocr_psm": recognized.get("ocr_psm"),
+            "image_sha256": recognized.get("image_sha256"),
+            "window_title": recognized.get("window_title"),
+            "validation": recognized.get("validation"),
+        },
+    }
+    if offset_ticks is not None:
+        plan["offset_ticks"] = int(offset_ticks)
+    return plan
 
 
 def main() -> int:
@@ -366,7 +502,20 @@ def main() -> int:
     p.add_argument("--save-capture", type=Path, help="save the captured WH6 frame for OCR debugging")
     p.add_argument("--tesseract-cmd", help="path to tesseract.exe if not on PATH")
     p.add_argument("--lang", default="chi_sim+eng")
+    p.add_argument("--ocr-effort", choices=("fast", "auto", "thorough"), default="auto", help="OCR search depth: fast=1 call, auto=escalating, thorough=all variants")
     p.add_argument("--config", type=Path)
+    p.add_argument("--plan-out", type=Path, help="write a trade-plan draft JSON built from the recognized market")
+    p.add_argument("--direction", choices=("long", "short"))
+    p.add_argument("--size", type=int, default=1)
+    p.add_argument("--price-mode", choices=("manual", "opponent", "queue", "last", "offset"), default="opponent")
+    p.add_argument("--entry-price", type=float)
+    p.add_argument("--stop-loss", type=float)
+    p.add_argument("--take-profit", type=float)
+    p.add_argument("--smc-tag")
+    p.add_argument("--htf-bias", choices=("long", "short", "ranging", "unclear"))
+    p.add_argument("--is-add-on", action="store_true")
+    p.add_argument("--plan-check", action="store_true", help="run the risk check on the generated plan and save a snapshot")
+    p.add_argument("--snapshots", type=Path, help="snapshot JSONL path used with --plan-check")
     args = p.parse_args()
     if args.list_windows:
         records = enumerate_windows_process(args.process)
@@ -389,7 +538,7 @@ def main() -> int:
     try:
         while True:
             if args.image:
-                result = ocr_image_best(args.image, args.lang, region)
+                result = ocr_image_best(args.image, args.lang, region, args.ocr_effort)
             elif args.capture:
                 captures = capture_windows_process(args.process, args.interval if args.watch else 0, 1, args.capture_mode)
                 result = None
@@ -406,7 +555,7 @@ def main() -> int:
                     temp = Path.cwd() / ".wh6_capture_tmp.png"
                     image.save(temp)
                     try:
-                        parsed = ocr_image_best(temp, args.lang, region)
+                        parsed = ocr_image_best(temp, args.lang, region, args.ocr_effort)
                     finally:
                         temp.unlink(missing_ok=True)
                     parsed["window_title"] = title
@@ -440,13 +589,42 @@ def main() -> int:
                 with args.out.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(result, ensure_ascii=False) + "\n")
             results.append(result)
+            check_result = None
+            if args.plan_out:
+                plan = build_plan_draft(
+                    result,
+                    direction=args.direction,
+                    size=args.size,
+                    price_mode=args.price_mode,
+                    entry_price=args.entry_price,
+                    stop_loss=args.stop_loss,
+                    take_profit=args.take_profit,
+                    smc_tag=args.smc_tag,
+                    htf_bias=args.htf_bias,
+                    is_add_on=args.is_add_on,
+                )
+                args.plan_out.parent.mkdir(parents=True, exist_ok=True)
+                args.plan_out.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                print(f"plan draft written: {args.plan_out}", flush=True)
+                if args.plan_check:
+                    check_result = check_plan(plan, config)
+                    if args.snapshots:
+                        check_result["snapshot_id"] = save_snapshot(plan, check_result, args.snapshots)
+                    else:
+                        check_result["snapshot_id"] = save_snapshot(plan, check_result)
+                    print(json.dumps(check_result, ensure_ascii=False, indent=2), flush=True)
+                    results.append({"plan_check": check_result})
             if not args.watch:
                 break
             import time
             time.sleep(max(.25, args.interval))
     except KeyboardInterrupt:
         pass
-    return 0 if results and results[-1].get("validation", {}).get("valid") else 2
+    ocr_results = [item for item in results if "validation" in item]
+    plan_results = [item["plan_check"] for item in results if "plan_check" in item]
+    if plan_results:
+        return 0 if plan_results[-1].get("status") in ("PASS", "WARN") else 2
+    return 0 if ocr_results and ocr_results[-1]["validation"].get("valid") else 2
 
 if __name__ == "__main__":
     raise SystemExit(main())

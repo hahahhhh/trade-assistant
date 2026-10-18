@@ -44,6 +44,18 @@ py workspace-trade-summary-analysis/wh6_screen.py --capture --watch --interval 2
 
 识别策略针对 WH6 的图1右侧行情栏（合约、卖出/买入、最新、涨跌等字段）。图2下单面板中的买多/卖空/平仓按钮不会被点击，程序也不向原窗口写入。截图 OCR 结果会校验品种配置、最小跳动和买卖盘顺序；低置信度或不完整字段必须人工核验。
 
+OCR 默认按档位执行（`--ocr-effort fast|auto|thorough`）：先只识别右侧行情栏的灰度图，字段齐全即停止；缺失时才逐级启用其他页面模式、对比度和颜色通道。`auto` 最坏 7 次 Tesseract 调用，正常命中时只有 1 次。
+
+识别结果可直接生成交易计划草稿并跑风险检查：
+
+```powershell
+python workspace-trade-summary-analysis\wh6_screen.py --capture --capture-mode app `
+  --plan-out plan.json --plan-check --direction long --stop-loss 4863 `
+  --smc-tag FVG --htf-bias long
+```
+
+计划中的 `contract` 会规范化为 `V2701`（与风险配置的品种码一致），WH6 原始标签保留在 `contract_label`。
+
 Windows 窗口捕获依赖指定进程 `mytrader_spqh.exe`。本项目运行环境如果不是 Windows，`--capture` 不可用；可在 Windows 上运行该脚本，或先从 WH6 截图再使用 `--image`。
 
 ## 计划 JSON 格式
