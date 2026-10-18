@@ -30,14 +30,47 @@ PROCESS_NAME = "mytrader_spqh.exe"
 APP_NAME = "wh6"
 
 
-def _normalize_contract(raw: str) -> tuple[str, str]:
-    token = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
-    token = token.removesuffix("M")
-    aliases = {"PVC": "V"}
-    for prefix in sorted(("PVC", "LH", "JD", "RU", "FG", "MA", "JM", "V", "C"), key=len, reverse=True):
-        if token.startswith(prefix) and token[len(prefix):].isdigit():
-            return aliases.get(prefix, prefix), token
-    raise ValueError(f"Unrecognized futures contract: {raw!r}")
+VARIETY_ALIASES = {"PVC": "V"}
+# WH6 shows a Chinese name next to the code; the Chinese name is usually the
+# most reliable signal because OCR mangles the short Latin code.
+VARIETY_BY_NAME = {
+    "螺纹钢": "RB",
+    "聚氯乙烯": "V",
+    "生猪": "LH",
+    "玻璃": "FG",
+    "甲醇": "MA",
+    "焦煤": "JM",
+    "玉米": "C",
+    "橡胶": "RU",
+    "鸡蛋": "JD",
+    "铁矿石": "I",
+}
+VARIETY_CODES = ("PVC", "RB", "JD", "LH", "RU", "FG", "MA", "JM", "V", "C", "I")
+
+
+def _contract_from_text(text: str) -> tuple[str, str, str, int] | None:
+    """Return variety, canonical contract, WH6 label, and match end offset."""
+    for name, code in VARIETY_BY_NAME.items():
+        match = re.search(name + r"\s*(\d(?:[\s,.-]*\d){2,3})(?!\d)", text)
+        if match:
+            digits = re.sub(r"[^0-9]", "", match.group(1))
+            return code, f"{code}{digits}", f"{code}{digits}", match.end()
+    code_pattern = "|".join(r"\s*".join(ch for ch in code) for code in VARIETY_CODES)
+    match = re.search(
+        r"(?<![A-Za-z0-9])(" + code_pattern + r")\s*(\d(?:[\s,.-]*\d){2,3})(?!\d)",
+        text,
+        re.I,
+    )
+    if match:
+        raw_code = re.sub(r"\s", "", match.group(1)).upper()
+        canonical = VARIETY_ALIASES.get(raw_code, raw_code)
+        digits = re.sub(r"[^0-9]", "", match.group(2))
+        return canonical, f"{canonical}{digits}", f"{raw_code}{digits}", match.end()
+    return None
+
+
+def _prices_near(text: str, label: str) -> list[float]:
+    return [float(value) for value in re.findall(label + r"\s*[:：]?\s*(\d{2,6}(?:\.\d+)?)", text)]
 
 
 def parse_wh6_ocr(text: str, confidence: float | None = None) -> dict[str, Any]:
@@ -51,51 +84,43 @@ def parse_wh6_ocr(text: str, confidence: float | None = None) -> dict[str, Any]:
     text = re.sub(r"买\s*[入一]", "买入", text)
     text = re.sub(r"最\s*新", "最新", text)
     result: dict[str, Any] = {}
-    # OCR frequently inserts spaces inside the contract (e.g. `PVC 2701 M`).
-    # Match prefixes and digits separately, then normalize the complete token.
-    contracts = re.findall(
-        r"(?<![A-Za-z])(?:PVC|V|JD|LH|RU|FG|MA|JM|C)\s*\d(?:[\s,.-]*\d){3}\s*M?\b",
-        text,
-        re.I,
-    )
-    if contracts:
-        # The first contract is typically chart tab/current contract.
-        variety, contract = _normalize_contract(contracts[0])
-        result["variety"] = variety
-        result["contract"] = contract
+    contract = _contract_from_text(text)
+    panel_start = 0
+    if contract:
+        result["variety"], result["contract"], result["contract_label"], panel_start = contract
     # WH6 quote panel labels: 卖出 = ask1, 买入 = bid1, 最新 = last.
-    for label, field in (("卖出", "ask1"), ("卖一", "ask1"), ("买入", "bid1"), ("买一", "bid1"), ("最新", "last")):
-        match = re.search(label + r"\s*[:：]?\s*([0-9]{2,7}(?:\.[0-9]+)?)", text)
-        if match and field not in result:
-            result[field] = float(match.group(1))
-    # OCR often drops one glyph from the fixed labels, e.g. `出 4903`,
-    # `入 4902`, or `新 4903`. These forms are restricted to the quote
-    # section after the contract to avoid chart labels and prices.
-    panel = text[text.find(result.get("contract", "")):] if result.get("contract") else text
+    for label, field in (("卖出", "ask1"), ("买入", "bid1"), ("最新", "last")):
+        values = _prices_near(text, label)
+        if not values:
+            continue
+        # 卖出/买入 belong to the best quote; 最新 is a single price.
+        result.setdefault(field, min(values) if field == "ask1" else values[0])
+    # Five-level book (螺纹钢/铁矿石 panels): 卖五..卖一 and 买一..买五.
+    # The best ask is the lowest 卖 row; the best bid is the highest 买 row.
+    asks = []
+    bids = []
+    for level in "一二三四五":
+        asks.extend(_prices_near(text, r"卖\s*" + level))
+        bids.extend(_prices_near(text, r"买\s*" + level))
+    if asks:
+        result.setdefault("ask1", min(asks))
+    if bids:
+        result.setdefault("bid1", max(bids))
+    # OCR often drops one glyph from a label, e.g. `出 4903` / `入 4902` / `新 4903`.
+    # Only use these forms after the contract so chart labels cannot leak in.
+    panel = text[panel_start:]
     if "ask1" not in result:
-        match = re.search(r"出\s*[:：]?\s*(4[0-9]{3}|5[0-9]{3})", panel)
+        match = re.search(r"出\s*[:：]?\s*(\d{2,6}(?:\.\d+)?)", panel)
         if match:
             result["ask1"] = float(match.group(1))
     if "bid1" not in result:
-        match = re.search(r"(?:入|EVN)\s*[:：]?\s*(4[0-9]{3}|5[0-9]{3})", panel)
+        match = re.search(r"(?:入|EVN)\s*[:：]?\s*(\d{2,6}(?:\.\d+)?)", panel)
         if match:
             result["bid1"] = float(match.group(1))
     if "last" not in result:
-        match = re.search(r"(?:最\s*)?新\s*[:：]?\s*(4[0-9]{3}|5[0-9]{3})", panel)
+        match = re.search(r"新\s*[:：]?\s*(\d{2,6}(?:\.\d+)?)", panel)
         if match:
             result["last"] = float(match.group(1))
-    # Final fallback for WH6's fixed quote-panel order when labels are lost:
-    # use the first two four-digit prices after the contract as ask/bid. Only
-    # use the next price as last if it forms a plausible order book.
-    if not all(key in result for key in ("ask1", "bid1", "last")):
-        prices = [float(value) for value in re.findall(r"\b(?:4[0-9]{3}|5[0-9]{3})\b", panel)]
-        if len(prices) >= 2:
-            ask, bid = prices[0], prices[1]
-            if bid <= ask:
-                result.setdefault("ask1", ask)
-                result.setdefault("bid1", bid)
-                if len(prices) >= 3 and abs(prices[2] - ask) <= 20:
-                    result.setdefault("last", prices[2])
     # Quote panel secondary values are optional; capture only when label-based.
     for label, field in (("涨跌", "change_text"), ("开盘", "open"), ("最高", "high"), ("最低", "low"), ("昨收", "prev_close"), ("持仓", "open_interest"), ("总量", "volume")):
         match = re.search(label + r"\s*[:：]?\s*([+-]?[0-9,]+(?:\.[0-9]+)?%?)", text)
@@ -288,6 +313,16 @@ def _quote_score(parsed: dict[str, Any]) -> tuple[int, float]:
     return _quote_fields_found(parsed), float(parsed.get("ocr_confidence", 0) or 0)
 
 
+def _quote_is_complete(parsed: dict[str, Any]) -> bool:
+    """All four quote fields with a sane book: no point retrying for confidence."""
+    if _quote_fields_found(parsed) < len(QUOTE_FIELDS):
+        return False
+    try:
+        return float(parsed["bid1"]) <= float(parsed["ask1"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _render_variant(image: Any, variant_name: str) -> Any:
     from PIL import ImageOps, ImageEnhance, ImageFilter  # type: ignore
     if variant_name == "gray":
@@ -370,7 +405,6 @@ def ocr_quote_image(
     lang: str = "chi_sim+eng",
     region: tuple[int, int, int, int] | None = None,
     effort: str = "auto",
-    stop_confidence: float = 0.80,
 ) -> dict[str, Any]:
     """Tiered WH6 OCR: one cheap pass first, escalating only on failure.
 
@@ -406,9 +440,9 @@ def ocr_quote_image(
             if score > best_score:
                 best = parsed
                 best_score = score
-            if score[0] >= len(QUOTE_FIELDS) and score[1] >= stop_confidence:
+            if _quote_is_complete(parsed):
                 break
-        if best_score[0] >= len(QUOTE_FIELDS) and best_score[1] >= stop_confidence:
+        if best is not None and _quote_is_complete(best):
             break
 
     assert best is not None

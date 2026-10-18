@@ -17,7 +17,12 @@
     "MSS/CHoCH",
     "Other"
   ],
-  "htf_bias_values": ["long", "short", "ranging", "unclear"],
+  "htf_bias_values": [
+    "long",
+    "short",
+    "ranging",
+    "unclear"
+  ],
   "instruments": {
     "V": {
       "value_per_point": 5,
@@ -46,10 +51,32 @@
       "slippage_buffer_per_lot": 0,
       "configured": true
     },
-    "JD": {"configured": false},
-    "RU": {"configured": false},
-    "MA": {"configured": false},
-    "C": {"configured": false},
-    "JM": {"configured": false}
+    "JD": {
+      "configured": false
+    },
+    "RU": {
+      "configured": false
+    },
+    "MA": {
+      "configured": false
+    },
+    "C": {
+      "configured": false
+    },
+    "JM": {
+      "configured": false
+    },
+    "RB": {
+      "name": "螺纹钢",
+      "exchange": "SHFE",
+      "value_per_point": null,
+      "min_tick": null,
+      "value_per_tick": null,
+      "single_trade_limit_rmb": null,
+      "round_trip_cost_per_lot": 0,
+      "slippage_buffer_per_lot": 0,
+      "configured": false,
+      "note": "Fill value_per_point/min_tick/single_trade_limit_rmb before enabling"
+    }
   }
 }

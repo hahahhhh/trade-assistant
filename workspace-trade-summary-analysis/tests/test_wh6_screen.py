@@ -13,7 +13,8 @@ class WH6Tests(unittest.TestCase):
     def test_parse_quote_panel(self):
         result = wh6.parse_wh6_ocr('PVC2701M DCE 卖出 4903 5 买入 4902 27 最新 4903 涨跌 55/1.13% 开盘 4870 最高 4938 最低 4860')
         self.assertEqual(result['variety'], 'V')
-        self.assertEqual(result['contract'], 'PVC2701')
+        self.assertEqual(result['contract'], 'V2701')
+        self.assertEqual(result['contract_label'], 'PVC2701')
         self.assertEqual(result['ask1'], 4903)
         self.assertEqual(result['bid1'], 4902)
         self.assertEqual(result['last'], 4903)
@@ -21,13 +22,29 @@ class WH6Tests(unittest.TestCase):
     def test_parse_spaced_contract(self):
         result = wh6.parse_wh6_ocr('P V C 2 7 0 1 M 卖出 4903 买入 4902 最新 4903')
         self.assertEqual(result['variety'], 'V')
-        self.assertEqual(result['contract'], 'PVC2701')
+        self.assertEqual(result['contract'], 'V2701')
+        self.assertEqual(result['contract_label'], 'PVC2701')
 
     def test_parse_spaced_quote_labels(self):
         result = wh6.parse_wh6_ocr('PVC2701 v2701 卖 出 4903 买 入 4902 最 新 4903')
         self.assertEqual(result['ask1'], 4903)
         self.assertEqual(result['bid1'], 4902)
         self.assertEqual(result['last'], 4903)
+
+    def test_parse_rebar_five_level_book(self):
+        text = ('螺纹钢2701 (SHFE rb2701) 卖五 3091 1262 卖四 3090 3705 卖三 3089 2739 '
+                '卖二 3088 1027 卖一 3087 353 买一 3086 20 买二 3085 333 买三 3084 391 '
+                '买四 3083 166 买五 3082 235 最新 3086 总量 261956')
+        result = wh6.parse_wh6_ocr(text, 0.64)
+        self.assertEqual(result['variety'], 'RB')
+        self.assertEqual(result['contract'], 'RB2701')
+        self.assertEqual(result['ask1'], 3087)
+        self.assertEqual(result['bid1'], 3086)
+        self.assertEqual(result['last'], 3086)
+
+    def test_unknown_variety_yields_no_contract(self):
+        result = wh6.parse_wh6_ocr('某品种2701 卖一 100 买一 99 最新 100', 0.5)
+        self.assertNotIn('variety', result)
 
     def test_quote_price_fallback(self):
         result = wh6.parse_wh6_ocr('PVC2701 出 4903 EVN 4902 最 新 4903')

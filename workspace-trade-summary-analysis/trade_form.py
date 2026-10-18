@@ -267,6 +267,9 @@ def run_form() -> int:
         lines.append(f"来源：{data.get('source', '?')}")
         if data.get("window_title"):
             lines.append(f"窗口：{data['window_title']}")
+        if data.get("ocr_text"):
+            raw = str(data["ocr_text"])
+            lines.extend(["", "OCR 原文（截断）：", f"  {raw[:300]}{'…' if len(raw) > 300 else ''}"])
         if problems:
             lines.extend(["", "校验问题："] + [f"  · {item}" for item in problems])
             form["status"].set("行情已读取，但存在校验问题，请核对后再检查计划")
