@@ -26,7 +26,7 @@ PLAN_DIR = ROOT / "data" / "plans"
 SNAPSHOTS = ROOT / "data" / "trade_assistant" / "pre_trade_snapshots.jsonl"
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-DIRECTIONS = (("买多 / long", "long"), ("卖空 / short", "short"))
+DIRECTIONS = (("买多", "long"), ("卖空", "short"))
 PRICE_MODES = (("对手价", "opponent"), ("排队价", "queue"), ("最新价", "last"), ("手工价", "manual"))
 HTF_CHOICES = (("多头", "long"), ("空头", "short"), ("震荡", "ranging"), ("不清晰", "unclear"))
 
@@ -181,7 +181,10 @@ def run_form() -> int:
 
     root = tk.Tk()
     root.title("WH6 交易计划（只读，不下单）")
-    root.geometry("760x720")
+    try:
+        root.state("zoomed")  # Windows: start maximized so no label gets clipped
+    except tk.TclError:
+        root.geometry("980x820")
 
     form: dict[str, Any] = {
         "direction": tk.StringVar(value="long"),
@@ -233,7 +236,22 @@ def run_form() -> int:
         recognized["contract_label"] = data.get("contract")
         market_var.set(market_summary(data))
         problems = data.get("validation", {}).get("errors", [])
-        form["status"].set("行情已读取" if not problems else "行情已读取，但有校验问题：" + "；".join(problems))
+        warnings = data.get("validation", {}).get("warnings", [])
+        lines = [f"合约：{data.get('contract', '?')}", f"卖一：{data.get('ask1', '?')}",
+                 f"买一：{data.get('bid1', '?')}", f"最新：{data.get('last', '?')}"]
+        if data.get("ocr_confidence") is not None:
+            lines.append(f"OCR 置信度：{data['ocr_confidence']:.3f}")
+        lines.append(f"来源：{data.get('source', '?')}")
+        if data.get("window_title"):
+            lines.append(f"窗口：{data['window_title']}")
+        if problems:
+            lines.extend(["", "校验问题："] + [f"  · {item}" for item in problems])
+            form["status"].set("行情已读取，但存在校验问题，请核对后再检查计划")
+        else:
+            form["status"].set("行情已读取，选择方向后点「检查计划」")
+        if warnings:
+            lines.extend(["", "提示："] + [f"  · {item}" for item in warnings])
+        write_output("\n".join(lines))
         fill_prices()
 
     def refresh() -> None:
@@ -333,57 +351,83 @@ def run_form() -> int:
         ttk.Button(win, text="确定", command=accept).grid(row=4, column=0, columnspan=2, pady=8)
 
     # ---- layout -----------------------------------------------------------
-    pad = {"padx": 6, "pady": 4}
-    ttk.Label(root, textvariable=market_var, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w", **pad)
+    # grid everywhere: pack(side="left") shrinks labels once the window is
+    # narrower than the requested width, which truncated button text.
+    pad = {"padx": 8, "pady": 5}
+    root.minsize(940, 720)
+    root.grid_columnconfigure(0, weight=1)
+    root.grid_rowconfigure(10, weight=1)
 
-    top = ttk.Frame(root); top.pack(anchor="w", fill="x", **pad)
-    ttk.Label(top, text="方向").pack(side="left")
-    for label, value in DIRECTIONS:
-        ttk.Radiobutton(top, text=label, value=value, variable=form["direction"], command=fill_prices).pack(side="left", padx=4)
-    ttk.Checkbutton(top, text="加仓", variable=form["is_add_on"]).pack(side="left", padx=12)
+    ttk.Label(root, textvariable=market_var, font=("Microsoft YaHei UI", 11, "bold")).grid(row=0, column=0, sticky="w", **pad)
 
-    modes = ttk.Frame(root); modes.pack(anchor="w", fill="x", **pad)
-    ttk.Label(modes, text="价格").pack(side="left")
-    for label, value in PRICE_MODES:
-        ttk.Radiobutton(modes, text=label, value=value, variable=form["price_mode"], command=fill_prices).pack(side="left", padx=4)
+    direction_row = ttk.Frame(root)
+    direction_row.grid(row=1, column=0, sticky="w", **pad)
+    ttk.Label(direction_row, text="方向").grid(row=0, column=0, sticky="w")
+    for index, (label, value) in enumerate(DIRECTIONS, start=1):
+        ttk.Radiobutton(direction_row, text=label, value=value,
+                        variable=form["direction"], command=fill_prices).grid(row=0, column=index, sticky="w", padx=8)
+    ttk.Checkbutton(direction_row, text="加仓", variable=form["is_add_on"]).grid(row=0, column=3, sticky="w", padx=20)
 
-    nums = ttk.Frame(root); nums.pack(anchor="w", fill="x", **pad)
-    ttk.Label(nums, text="手数").pack(side="left")
-    ttk.Spinbox(nums, from_=1, to=50, width=5, textvariable=form["size"]).pack(side="left", padx=4)
-    ttk.Label(nums, text="止损跳数").pack(side="left", padx=(12, 0))
-    ttk.Spinbox(nums, from_=1, to=200, width=6, textvariable=form["stop_ticks"], command=fill_prices).pack(side="left", padx=4)
-    ttk.Label(nums, text="止盈跳数").pack(side="left", padx=(12, 0))
-    ttk.Spinbox(nums, from_=1, to=400, width=6, textvariable=form["take_ticks"], command=fill_prices).pack(side="left", padx=4)
+    modes = ttk.Frame(root)
+    modes.grid(row=2, column=0, sticky="w", **pad)
+    ttk.Label(modes, text="价格").grid(row=0, column=0, sticky="w")
+    for index, (label, value) in enumerate(PRICE_MODES, start=1):
+        ttk.Radiobutton(modes, text=label, value=value,
+                        variable=form["price_mode"], command=fill_prices).grid(row=0, column=index, sticky="w", padx=8)
 
-    prices = ttk.Frame(root); prices.pack(anchor="w", fill="x", **pad)
-    for label, key in (("入场", "entry_price"), ("止损", "stop_loss"), ("止盈", "take_profit")):
-        ttk.Label(prices, text=label).pack(side="left")
-        ttk.Entry(prices, textvariable=form[key], width=10).pack(side="left", padx=4)
+    nums = ttk.Frame(root)
+    nums.grid(row=3, column=0, sticky="w", **pad)
+    for column, (label, key, start, end, width) in enumerate((
+        ("手数", "size", 1, 50, 5),
+        ("止损跳数", "stop_ticks", 1, 200, 6),
+        ("止盈跳数", "take_ticks", 1, 400, 6),
+    )):
+        ttk.Label(nums, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 20, 4))
+        ttk.Spinbox(nums, from_=start, to=end, width=width, textvariable=form[key],
+                    command=fill_prices).grid(row=0, column=column * 2 + 1, sticky="w")
+
+    prices = ttk.Frame(root)
+    prices.grid(row=4, column=0, sticky="w", **pad)
+    for column, (label, key) in enumerate((("入场", "entry_price"), ("止损", "stop_loss"), ("止盈", "take_profit"))):
+        ttk.Label(prices, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 20, 4))
+        ttk.Entry(prices, textvariable=form[key], width=12).grid(row=0, column=column * 2 + 1, sticky="w")
 
     smc = ttk.LabelFrame(root, text="SMC 标签")
-    smc.pack(anchor="w", fill="x", **pad)
+    smc.grid(row=5, column=0, sticky="ew", **pad)
+    for column in range(4):
+        smc.grid_columnconfigure(column, weight=1, uniform="smc")
     for index, tag in enumerate(smc_tags):
-        ttk.Radiobutton(smc, text=tag, value=tag, variable=form["smc_tag"]).grid(row=index // 4, column=index % 4, sticky="w", padx=4, pady=2)
-    ttk.Label(smc, text="自定义").grid(row=2, column=0, sticky="w", padx=4)
-    ttk.Entry(smc, textvariable=form["smc_custom"], width=28).grid(row=2, column=1, columnspan=3, sticky="w", padx=4, pady=4)
+        ttk.Radiobutton(smc, text=tag, value=tag, variable=form["smc_tag"]).grid(
+            row=index // 4, column=index % 4, sticky="w", padx=6, pady=3)
+    custom_row = index // 4 + 1 if smc_tags else 0
+    ttk.Label(smc, text="自定义").grid(row=custom_row, column=0, sticky="w", padx=6, pady=(6, 4))
+    ttk.Entry(smc, textvariable=form["smc_custom"], width=30).grid(
+        row=custom_row, column=1, columnspan=3, sticky="w", padx=6, pady=(6, 4))
 
     htf = ttk.LabelFrame(root, text="HTF Bias")
-    htf.pack(anchor="w", fill="x", **pad)
-    for label, value in HTF_CHOICES:
-        ttk.Radiobutton(htf, text=label, value=value, variable=form["htf_bias"]).pack(side="left", padx=6)
+    htf.grid(row=6, column=0, sticky="ew", **pad)
+    for column in range(4):
+        htf.grid_columnconfigure(column, weight=1, uniform="htf")
+    for index, (label, value) in enumerate(HTF_CHOICES):
+        ttk.Radiobutton(htf, text=label, value=value, variable=form["htf_bias"]).grid(
+            row=0, column=index, sticky="w", padx=6, pady=4)
 
-    tess = ttk.Frame(root); tess.pack(anchor="w", fill="x", **pad)
-    ttk.Label(tess, text="Tesseract").pack(side="left")
-    ttk.Entry(tess, textvariable=form["tesseract_cmd"], width=52).pack(side="left", padx=4)
+    tess = ttk.Frame(root)
+    tess.grid(row=7, column=0, sticky="ew", **pad)
+    ttk.Label(tess, text="Tesseract").grid(row=0, column=0, sticky="w")
+    ttk.Entry(tess, textvariable=form["tesseract_cmd"]).grid(row=0, column=1, sticky="ew", padx=6)
+    tess.grid_columnconfigure(1, weight=1)
 
-    actions = ttk.Frame(root); actions.pack(anchor="w", fill="x", **pad)
-    ttk.Button(actions, text="刷新行情", command=refresh).pack(side="left", padx=4)
-    ttk.Button(actions, text="手工填价", command=manual_market).pack(side="left", padx=4)
-    ttk.Button(actions, text="检查计划", command=check).pack(side="left", padx=4)
-    ttk.Button(actions, text="保存计划", command=save).pack(side="left", padx=4)
+    actions = ttk.Frame(root)
+    actions.grid(row=8, column=0, sticky="w", **pad)
+    for column, (label, command) in enumerate((
+        ("刷新行情", refresh), ("手工填价", manual_market),
+        ("检查计划", check), ("保存计划", save),
+    )):
+        ttk.Button(actions, text=label, command=command, width=12).grid(row=0, column=column, padx=6)
 
-    ttk.Label(root, textvariable=form["status"], foreground="#333").pack(anchor="w", **pad)
-    output.pack(fill="both", expand=True, padx=6, pady=6)
+    ttk.Label(root, textvariable=form["status"], foreground="#333").grid(row=9, column=0, sticky="w", **pad)
+    output.grid(row=10, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
     def on_close() -> None:
         save_state({"tesseract_cmd": form["tesseract_cmd"].get()})
