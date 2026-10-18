@@ -184,6 +184,13 @@ class FormLogicTests(unittest.TestCase):
             self.assertEqual(rows[0]['status'], 'REJECT')
             self.assertEqual(rows[0]['path'], '')
 
+    def test_unique_row_ids_handles_duplicate_fingerprints(self):
+        rows = [{'fingerprint': 'abc'}, {'fingerprint': 'abc'}, {'fingerprint': ''}]
+        ids = [iid for iid, _row in tf.unique_row_ids(rows)]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(ids[0], 'abc')
+        self.assertEqual(ids[1], 'abc-2')
+
     def test_group_by_variety(self):
         rows = [{'variety': 'V'}, {'variety': 'RB'}, {'variety': 'V'}]
         groups = dict(tf.group_by_variety(rows))

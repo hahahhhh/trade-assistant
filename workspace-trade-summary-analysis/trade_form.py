@@ -35,7 +35,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.8"
+FORM_VERSION = "1.9"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -349,6 +349,22 @@ def load_history(snapshots_path: Path = SNAPSHOTS, plans_dir: Path = PLAN_DIR) -
         rows.append(_history_row(plan, record, None))
     rows.sort(key=lambda row: row.get("timestamp") or "", reverse=True)
     return rows
+
+
+def unique_row_ids(rows: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    """Treeview iids must be unique; identical plans can share a fingerprint."""
+    used: set[str] = set()
+    result: list[tuple[str, dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        base = str(row.get("fingerprint") or f"row{index}")
+        candidate = base
+        suffix = 1
+        while candidate in used:
+            suffix += 1
+            candidate = f"{base}-{suffix}"
+        used.add(candidate)
+        result.append((candidate, row))
+    return result
 
 
 def group_by_variety(rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -774,15 +790,19 @@ def run_form() -> int:
         table.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=(0, 8))
         scroll.pack(side="left", fill="y", padx=(0, 8), pady=(0, 8))
 
+        rows_by_iid: dict[str, dict[str, Any]] = {}
+
         def render(*_args: Any) -> None:
             table.delete(*table.get_children())
+            rows_by_iid.clear()
             selected = variety_var.get()
             shown = [row for row in rows if selected in ("全部", row.get("variety"))]
             for variety, group in group_by_variety(shown):
                 parent = table.insert("", "end", text=f"{variety}（{len(group)}）", open=True)
-                for row in group:
+                for iid, row in unique_row_ids(group):
+                    rows_by_iid[iid] = row
                     direction = "多" if row.get("direction") == "long" else ("空" if row.get("direction") == "short" else "")
-                    table.insert(parent, "end", iid=row["fingerprint"], text="", values=(
+                    table.insert(parent, "end", iid=iid, text="", values=(
                         (row.get("timestamp") or "")[:19].replace("T", " "),
                         row.get("contract"), direction, row.get("size"),
                         row.get("entry"), row.get("stop_loss"), row.get("take_profit"),
@@ -799,8 +819,7 @@ def run_form() -> int:
             render()
 
         def selected_rows() -> list[dict[str, Any]]:
-            wanted = set(table.selection())
-            return [row for row in rows if row["fingerprint"] in wanted]
+            return [rows_by_iid[iid] for iid in table.selection() if iid in rows_by_iid]
 
         def delete_selected() -> None:
             chosen = selected_rows()
