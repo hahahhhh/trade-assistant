@@ -67,20 +67,34 @@ def parse_wh6_ocr(text: str, confidence: float | None = None) -> dict[str, Any]:
         match = re.search(label + r"\s*[:：]?\s*([0-9]{2,7}(?:\.[0-9]+)?)", text)
         if match and field not in result:
             result[field] = float(match.group(1))
-    # Fallback for WH6's fixed quote-panel order when Chinese labels are
-    # partially lost: after the contract, the first two 4-digit prices are
-    # ask1 and bid1, and the next value near 最新 is last. This is accepted
-    # only when the order-book relationship is plausible.
+    # OCR often drops one glyph from the fixed labels, e.g. `出 4903`,
+    # `入 4902`, or `新 4903`. These forms are restricted to the quote
+    # section after the contract to avoid chart labels and prices.
+    panel = text[text.find(result.get("contract", "")):] if result.get("contract") else text
+    if "ask1" not in result:
+        match = re.search(r"出\s*[:：]?\s*(4[0-9]{3}|5[0-9]{3})", panel)
+        if match:
+            result["ask1"] = float(match.group(1))
+    if "bid1" not in result:
+        match = re.search(r"(?:入|EVN)\s*[:：]?\s*(4[0-9]{3}|5[0-9]{3})", panel)
+        if match:
+            result["bid1"] = float(match.group(1))
+    if "last" not in result:
+        match = re.search(r"(?:最\s*)?新\s*[:：]?\s*(4[0-9]{3}|5[0-9]{3})", panel)
+        if match:
+            result["last"] = float(match.group(1))
+    # Final fallback for WH6's fixed quote-panel order when labels are lost:
+    # use the first two four-digit prices after the contract as ask/bid. Only
+    # use the next price as last if it forms a plausible order book.
     if not all(key in result for key in ("ask1", "bid1", "last")):
-        panel = text[text.find(result.get("contract", "")):] if result.get("contract") else text
         prices = [float(value) for value in re.findall(r"\b(?:4[0-9]{3}|5[0-9]{3})\b", panel)]
-        if len(prices) >= 3:
-            for ask, bid, last in zip(prices, prices[1:], prices[2:]):
-                if bid <= ask and abs(last - ask) <= 20:
-                    result.setdefault("ask1", ask)
-                    result.setdefault("bid1", bid)
-                    result.setdefault("last", last)
-                    break
+        if len(prices) >= 2:
+            ask, bid = prices[0], prices[1]
+            if bid <= ask:
+                result.setdefault("ask1", ask)
+                result.setdefault("bid1", bid)
+                if len(prices) >= 3 and abs(prices[2] - ask) <= 20:
+                    result.setdefault("last", prices[2])
     # Quote panel secondary values are optional; capture only when label-based.
     for label, field in (("涨跌", "change_text"), ("开盘", "open"), ("最高", "high"), ("最低", "low"), ("昨收", "prev_close"), ("持仓", "open_interest"), ("总量", "volume")):
         match = re.search(label + r"\s*[:：]?\s*([+-]?[0-9,]+(?:\.[0-9]+)?%?)", text)
