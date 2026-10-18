@@ -93,6 +93,10 @@ class WH6Tests(unittest.TestCase):
         self.assertEqual(wh6.filter_window_records(records, "quote"), [records[1]])
         self.assertEqual(wh6.filter_window_records(records, None), records)
 
+    def test_results_carry_tool_version(self):
+        result = wh6.parse_wh6_ocr('PVC2701 卖出 4903 买入 4902 最新 4903', .9)
+        self.assertEqual(result['tool_version'], wh6.TOOL_VERSION)
+
     def test_process_constants(self):
         self.assertEqual(wh6.PROCESS_NAME, 'mytrader_spqh.exe')
         self.assertIn('app', ('app', 'window', 'monitor'))

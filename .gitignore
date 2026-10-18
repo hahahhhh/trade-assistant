@@ -1,6 +1,7 @@
 # Deny by default. Only the reviewed project files below may be staged.
 /*
 !/.gitignore
+!/VERSION
 !/workspace-trade-summary-analysis/
 /workspace-trade-summary-analysis/*
 !/workspace-trade-summary-analysis/trade_assistant.py

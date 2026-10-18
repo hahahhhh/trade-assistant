@@ -26,6 +26,7 @@ except ModuleNotFoundError:  # direct file import from the test runner
     _spec.loader.exec_module(_module)
     load_config, check_plan, save_snapshot = _module.load_config, _module.check_plan, _module.save_snapshot
 
+TOOL_VERSION = "2026-10.4"
 PROCESS_NAME = "mytrader_spqh.exe"
 APP_NAME = "wh6"
 
@@ -127,6 +128,7 @@ def parse_wh6_ocr(text: str, confidence: float | None = None) -> dict[str, Any]:
         if match:
             result[field] = match.group(1).replace(",", "")
     result["source"] = "wh6_ocr"
+    result["tool_version"] = TOOL_VERSION
     if confidence is not None:
         result["ocr_confidence"] = round(float(confidence), 4)
     return result
@@ -526,6 +528,7 @@ def build_plan_draft(
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--version", action="version", version=f"wh6_screen {TOOL_VERSION}")
     p.add_argument("--image", type=Path, help="OCR a saved WH6 screenshot")
     p.add_argument("--list-windows", action="store_true", help="list visible windows for the process, then exit")
     p.add_argument("--window-title", help="only capture windows whose title contains this text (case-insensitive)")

@@ -68,6 +68,9 @@ class FormLogicTests(unittest.TestCase):
         result = tf.build_plan_from_form(fields(stop_loss=4862.0), RECOGNIZED, config)
         self.assertEqual(result['check']['status'], 'REJECT')
 
+    def test_form_version_is_exposed(self):
+        self.assertRegex(tf.FORM_VERSION, r"^\d+\.\d+$")
+
     def test_manual_prefill_uses_last_quote(self):
         prefill = tf.manual_prefill(RECOGNIZED)
         self.assertEqual(prefill['contract'], 'PVC2701')

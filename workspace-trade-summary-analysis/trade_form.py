@@ -25,6 +25,7 @@ STATE_PATH = ROOT / "data" / "trade_form_state.json"
 PLAN_DIR = ROOT / "data" / "plans"
 SNAPSHOTS = ROOT / "data" / "trade_assistant" / "pre_trade_snapshots.jsonl"
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+FORM_VERSION = "1.4"
 
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
 PRICE_MODES = (("对手价", "opponent"), ("排队价", "queue"), ("最新价", "last"), ("手工价", "manual"))
@@ -190,7 +191,7 @@ def run_form() -> int:
     smc_tags = config.get("smc_tags", [])
 
     root = tk.Tk()
-    root.title("WH6 交易计划（只读，不下单）")
+    root.title(f"WH6 交易计划 v{FORM_VERSION}（只读，不下单）")
     try:
         root.state("zoomed")  # Windows: start maximized so no label gets clipped
     except tk.TclError:
@@ -220,7 +221,7 @@ def run_form() -> int:
         "htf_bias": tk.StringVar(value="long"),
         "is_add_on": tk.BooleanVar(value=False),
         "tesseract_cmd": tk.StringVar(value=state.get("tesseract_cmd", DEFAULT_TESSERACT)),
-        "status": tk.StringVar(value="点击“刷新行情”读取 WH6，或直接手动填价"),
+        "status": tk.StringVar(value=f"v{FORM_VERSION} 已就绪：点击“刷新行情”读取 WH6，或直接手工填价"),
     }
     recognized: dict[str, Any] = {}
     last_result: dict[str, Any] = {}
