@@ -24,8 +24,16 @@ ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "data" / "trade_form_state.json"
 PLAN_DIR = ROOT / "data" / "plans"
 SNAPSHOTS = ROOT / "data" / "trade_assistant" / "pre_trade_snapshots.jsonl"
+CONFIG_PATH = ROOT / "data" / "trade_assistant_config.json"
+RISK_FIELDS = (
+    ("value_per_point", "每点价值（元）"),
+    ("min_tick", "最小跳动（点）"),
+    ("single_trade_limit_rmb", "单笔上限（元）"),
+    ("round_trip_cost_per_lot", "手续费/手（元）"),
+    ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
+)
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.4"
+FORM_VERSION = "1.5"
 
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
 PRICE_MODES = (("对手价", "opponent"), ("排队价", "queue"), ("最新价", "last"), ("手工价", "manual"))
@@ -157,6 +165,82 @@ def capture_and_recognize(tesseract_cmd: str | None, effort: str = "auto") -> di
         best["validation"]["valid"] = False
         best["validation"]["errors"].append("OCR confidence is below threshold; verify every field manually")
     return best
+
+
+def instrument_form_values(config: dict[str, Any], code: str) -> dict[str, Any]:
+    """Editable values for one instrument, blanks instead of nulls."""
+    inst = config["instruments"].get(code, {})
+    values: dict[str, Any] = {}
+    for key, _label in RISK_FIELDS:
+        value = inst.get(key)
+        values[key] = "" if value is None else f"{float(value):g}"
+    values["configured"] = bool(inst.get("configured"))
+    return values
+
+
+def build_instrument_config(config: dict[str, Any], code: str, values: dict[str, Any]) -> dict[str, Any]:
+    """Validate edited risk parameters and return an updated config copy.
+
+    ``value_per_tick`` is always derived, so the three numbers can never drift
+    out of sync (load_config rejects mismatches at startup).
+    """
+    code = code.upper()
+    instruments = config["instruments"]
+    if code not in instruments:
+        raise ValueError(f"未知品种：{code}")
+    enabled = bool(values.get("configured"))
+
+    def number(key: str, label: str, *, positive: bool, required: bool = True) -> float | None:
+        raw = str(values.get(key, "")).strip()
+        if not raw:
+            if required and enabled:
+                raise ValueError(f"启用 {code} 时必须填写「{label}」")
+            return None
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"「{label}」不是数字：{raw}") from exc
+        if positive and value <= 0:
+            raise ValueError(f"「{label}」必须大于 0")
+        if not positive and value < 0:
+            raise ValueError(f"「{label}」不能为负")
+        return value
+
+    value_per_point = number("value_per_point", "每点价值（元）", positive=True)
+    min_tick = number("min_tick", "最小跳动（点）", positive=True)
+    limit = number("single_trade_limit_rmb", "单笔上限（元）", positive=True)
+    cost = number("round_trip_cost_per_lot", "手续费/手（元）", positive=False, required=False) or 0.0
+    slippage = number("slippage_buffer_per_lot", "滑点缓冲/手（元）", positive=False, required=False) or 0.0
+
+    updated = dict(config)
+    instruments = dict(instruments)
+    instrument = dict(instruments[code])
+    instrument.update({
+        "value_per_point": value_per_point,
+        "min_tick": min_tick,
+        "value_per_tick": (value_per_point * min_tick) if value_per_point and min_tick else None,
+        "single_trade_limit_rmb": limit,
+        "round_trip_cost_per_lot": cost,
+        "slippage_buffer_per_lot": slippage,
+        "configured": bool(enabled and value_per_point and min_tick and limit),
+    })
+    if instrument["value_per_tick"] is not None:
+        instrument["value_per_tick"] = round(instrument["value_per_tick"], 8)
+    instruments[code] = instrument
+    updated["instruments"] = instruments
+    return updated
+
+
+def save_instrument_config(config: dict[str, Any], code: str, values: dict[str, Any],
+                           path: Path = CONFIG_PATH) -> dict[str, Any]:
+    """Persist edited parameters and return the reloaded config."""
+    updated = build_instrument_config(config, code, values)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup = path.with_suffix(path.suffix + ".bak")
+        backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return wh6.load_config(path)
 
 
 def manual_prefill(recognized: dict[str, Any]) -> dict[str, str]:
@@ -408,6 +492,78 @@ def run_form() -> int:
 
         ttk.Button(win, text="确定", command=accept).grid(row=4, column=0, columnspan=2, pady=8)
 
+    def edit_config() -> None:
+        """Edit per-instrument risk parameters without touching JSON by hand."""
+        nonlocal config
+        win = tk.Toplevel(root)
+        win.title("品种配置（写入 trade_assistant_config.json）")
+        codes = list(config["instruments"].keys())
+        default = recognized.get("variety") if recognized.get("variety") in codes else codes[0]
+        code_var = tk.StringVar(value=default)
+        fields = {key: tk.StringVar() for key, _ in RISK_FIELDS}
+        enabled = tk.BooleanVar(value=False)
+        per_tick = tk.StringVar(value="每跳 -")
+        name = tk.StringVar(value="")
+
+        def update_per_tick(*_args: Any) -> None:
+            try:
+                value = float(fields["value_per_point"].get()) * float(fields["min_tick"].get())
+            except ValueError:
+                per_tick.set("每跳 -")
+                return
+            per_tick.set(f"每跳 {value:g} 元（自动计算）")
+
+        def load_values(*_args: Any) -> None:
+            code = code_var.get()
+            values = instrument_form_values(config, code)
+            for key, _label in RISK_FIELDS:
+                fields[key].set(values[key])
+            enabled.set(values["configured"])
+            inst = config["instruments"].get(code, {})
+            name.set(inst.get("name") or code)
+            update_per_tick()
+
+        ttk.Label(win, text="品种").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        combo = ttk.Combobox(win, textvariable=code_var, values=codes, width=10, state="readonly")
+        combo.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        combo.bind("<<ComboboxSelected>>", load_values)
+        ttk.Label(win, textvariable=name, foreground="#555").grid(row=0, column=2, sticky="w", padx=8)
+
+        for index, (key, label) in enumerate(RISK_FIELDS, start=1):
+            ttk.Label(win, text=label).grid(row=index, column=0, sticky="w", padx=8, pady=4)
+            spin = ttk.Spinbox(win, textvariable=fields[key], width=14, from_=0, to=1000000, increment=1)
+            spin.grid(row=index, column=1, sticky="w", padx=8, pady=4)
+            if key in ("value_per_point", "min_tick"):
+                fields[key].trace_add("write", update_per_tick)
+
+        ttk.Label(win, textvariable=per_tick).grid(row=len(RISK_FIELDS) + 1, column=1, sticky="w", padx=8, pady=4)
+        ttk.Checkbutton(win, text="启用该品种（启用后才会参与风险检查）",
+                        variable=enabled).grid(row=len(RISK_FIELDS) + 2, column=0, columnspan=3, sticky="w", padx=8, pady=6)
+
+        def save() -> None:
+            nonlocal config
+            values = {key: fields[key].get() for key, _label in RISK_FIELDS}
+            values["configured"] = bool(enabled.get())
+            try:
+                config = save_instrument_config(config, code_var.get(), values)
+            except (ValueError, OSError) as exc:
+                messagebox.showerror("配置有误", str(exc))
+                return
+            inst = config["instruments"][code_var.get()]
+            form["status"].set(
+                f"配置已保存：{code_var.get()} 每点 {inst['value_per_point']:g} 元 / "
+                f"最小跳动 {inst['min_tick']:g} / 上限 {inst['single_trade_limit_rmb']:g} 元"
+            )
+            sync_increments()
+            fill_prices()
+            win.destroy()
+
+        ttk.Button(win, text="保存", command=save, width=10).grid(
+            row=len(RISK_FIELDS) + 3, column=0, columnspan=2, pady=(4, 12))
+        ttk.Button(win, text="取消", command=win.destroy, width=10).grid(
+            row=len(RISK_FIELDS) + 3, column=2, pady=(4, 12))
+        load_values()
+
     # ---- layout -----------------------------------------------------------
     # grid everywhere: pack(side="left") shrinks labels once the window is
     # narrower than the requested width, which truncated button text.
@@ -483,7 +639,7 @@ def run_form() -> int:
     actions.grid(row=8, column=0, sticky="w", **pad)
     for column, (label, command) in enumerate((
         ("刷新行情", refresh), ("手工填价", manual_market),
-        ("检查计划", check), ("保存计划", save),
+        ("检查计划", check), ("保存计划", save), ("品种配置", edit_config),
     )):
         ttk.Button(actions, text=label, command=command, width=12).grid(row=0, column=column, padx=6)
 

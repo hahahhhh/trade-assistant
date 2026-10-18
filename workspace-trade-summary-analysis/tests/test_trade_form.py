@@ -82,6 +82,48 @@ class FormLogicTests(unittest.TestCase):
         prefill = tf.manual_prefill({})
         self.assertEqual(prefill, {'contract': '', 'bid1': '', 'ask1': '', 'last': ''})
 
+    def test_config_values_for_configured_instrument(self):
+        values = tf.instrument_form_values(config, 'V')
+        self.assertEqual(values['value_per_point'], '5')
+        self.assertEqual(values['min_tick'], '1')
+        self.assertTrue(values['configured'])
+
+    def test_config_values_for_unconfigured_instrument_are_blank(self):
+        values = tf.instrument_form_values(config, 'RB')
+        self.assertEqual(values['value_per_point'], '')
+        self.assertFalse(values['configured'])
+
+    def test_build_config_derives_value_per_tick(self):
+        values = {'value_per_point': '10', 'min_tick': '5',
+                  'single_trade_limit_rmb': '300', 'configured': True}
+        updated = tf.build_instrument_config(config, 'RB', values)
+        instrument = updated['instruments']['RB']
+        self.assertEqual(instrument['value_per_tick'], 50)
+        self.assertTrue(instrument['configured'])
+        self.assertTrue(config['instruments']['RB']['configured'] is False)
+
+    def test_build_config_rejects_bad_numbers(self):
+        for bad in (
+            {'value_per_point': '0', 'min_tick': '1', 'single_trade_limit_rmb': '200'},
+            {'value_per_point': 'abc', 'min_tick': '1', 'single_trade_limit_rmb': '200'},
+            {'value_per_point': '10', 'min_tick': '', 'single_trade_limit_rmb': '200'},
+            {'value_per_point': '10', 'min_tick': '1', 'single_trade_limit_rmb': '-5'},
+        ):
+            with self.assertRaises(ValueError):
+                tf.build_instrument_config(config, 'RB', {**bad, 'configured': True})
+
+    def test_save_config_roundtrips_through_loader(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'cfg.json'
+            path.write_text(json.dumps(config, ensure_ascii=False), encoding='utf-8')
+            values = {'value_per_point': '10', 'min_tick': '1', 'single_trade_limit_rmb': '300',
+                      'round_trip_cost_per_lot': '3', 'slippage_buffer_per_lot': '2', 'configured': True}
+            reloaded = tf.save_instrument_config(config, 'RB', values, path)
+            self.assertEqual(reloaded['instruments']['RB']['value_per_tick'], 10)
+            self.assertTrue(path.with_suffix('.json.bak').exists())
+
     def test_summarize_and_market_summary(self):
         result = tf.build_plan_from_form(fields(), RECOGNIZED, config)
         text = tf.summarize(result)
