@@ -47,6 +47,25 @@ class FormLogicTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tf.suggest_prices(4903, 'sideways', 1, 30, 60)
 
+    def test_resolve_budget_uses_cap_when_linked(self):
+        self.assertEqual(tf.resolve_budget(200, '999', True), 200)
+
+    def test_resolve_budget_uses_manual_when_unlinked(self):
+        self.assertEqual(tf.resolve_budget(200, '400', False), 400)
+
+    def test_resolve_budget_rejects_bad_values(self):
+        with self.assertRaises(ValueError):
+            tf.resolve_budget(None, '400', True)
+        with self.assertRaises(ValueError):
+            tf.resolve_budget(200, 'abc', False)
+        with self.assertRaises(ValueError):
+            tf.resolve_budget(200, '0', False)
+
+    def test_linked_budget_never_exceeds_cap(self):
+        budget = tf.resolve_budget(200, '999', True)
+        sizing = tf.size_by_risk(budget, 25, 5)
+        self.assertLessEqual(sizing['risk_rmb'], 200)
+
     def test_size_by_risk_rounds_down(self):
         sizing = tf.size_by_risk(400, 25, 5)
         self.assertEqual(sizing['per_lot_risk'], 125)

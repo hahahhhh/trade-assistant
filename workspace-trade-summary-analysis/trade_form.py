@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.12"
+FORM_VERSION = "1.13"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -67,6 +67,21 @@ def suggest_prices(entry: float, direction: str, tick: float, stop_ticks: int, t
     stop = round(entry + stop_sign * stop_ticks * tick, 8)
     take = round(entry + take_sign * take_ticks * tick, 8)
     return {"stop_loss": stop, "take_profit": take}
+
+
+def resolve_budget(limit: float | None, manual: str, use_limit: bool) -> float:
+    """1R comes from the instrument cap unless the user opts to override it."""
+    if use_limit:
+        if limit is None or limit <= 0:
+            raise ValueError("该品种未设置单笔上限，请先取消勾选并填写 1R")
+        return float(limit)
+    try:
+        value = float(manual)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"1R 金额不是数字：{manual}") from exc
+    if value <= 0:
+        raise ValueError("1R 金额必须大于 0")
+    return value
 
 
 def size_by_risk(budget: float, stop_ticks: int, value_per_tick: float) -> dict[str, Any]:
@@ -484,6 +499,7 @@ def run_form() -> int:
         "link_take": tk.BooleanVar(value=True),
         "rr_ratio": tk.StringVar(value="2"),
         "risk_budget": tk.StringVar(value=str(state.get("risk_budget", "400"))),
+        "budget_from_limit": tk.BooleanVar(value=bool(state.get("budget_from_limit", True))),
         "take_ticks": tk.IntVar(value=60),
         "entry_price": tk.StringVar(),
         "stop_loss": tk.StringVar(),
@@ -502,6 +518,7 @@ def run_form() -> int:
     rr_preview = tk.StringVar(value="止损 30 跳 → 止盈 60 跳")
     rr_state: dict[str, Any] = {}
     sizing_text = tk.StringVar(value="1R 计算：等待行情")
+    budget_spin: dict[str, Any] = {}
 
     def invalidate(*_: Any) -> None:
         """Any edit after a check makes the old PASS/WARN/reject stale."""
@@ -563,6 +580,24 @@ def run_form() -> int:
         sync_increments()
         update_sizing()
 
+    def sync_budget() -> None:
+        """Keep 1R equal to the instrument cap when the checkbox is on."""
+        variety = recognized.get("variety")
+        instrument = config["instruments"].get(variety) if variety else None
+        spin = budget_spin.get("widget")
+        if form["budget_from_limit"].get() and instrument and instrument.get("configured"):
+            limit = instrument.get("single_trade_limit_rmb")
+            if limit is not None:
+                form["risk_budget"].set(f"{float(limit):g}")
+        if spin is not None:
+            spin.configure(state="disabled" if form["budget_from_limit"].get() else "normal")
+
+    def current_budget() -> float:
+        variety = recognized.get("variety")
+        instrument = config["instruments"].get(variety) if variety else None
+        limit = instrument.get("single_trade_limit_rmb") if instrument else None
+        return resolve_budget(limit, form["risk_budget"].get(), bool(form["budget_from_limit"].get()))
+
     def update_sizing() -> None:
         """Show lots affordable within 1R, and whether they exceed the cap."""
         variety = recognized.get("variety")
@@ -573,13 +608,14 @@ def run_form() -> int:
         stop_ticks = _safe_int(form["stop_ticks"], 30) or 1
         value_per_tick = float(instrument["value_per_tick"])
         try:
-            budget = float(form["risk_budget"].get())
+            budget = current_budget()
             sizing = size_by_risk(budget, stop_ticks, value_per_tick)
         except ValueError as exc:
             sizing_text.set(f"1R 计算：{exc}")
             return
         limit = float(instrument["single_trade_limit_rmb"])
-        text = (f"1R ¥{budget:g} ÷（{stop_ticks} 跳 × ¥{value_per_tick:g}）"
+        suffix = "（= 单笔上限）" if form["budget_from_limit"].get() else ""
+        text = (f"1R ¥{budget:g}{suffix} ÷（{stop_ticks} 跳 × ¥{value_per_tick:g}）"
                 f"= ¥{sizing['per_lot_risk']:g}/手 → {sizing['raw_lots']:.2f} 手"
                 f" → {sizing['lots']} 手（风险 ¥{sizing['risk_rmb']:g}，余 ¥{sizing['remainder']:g}）")
         if sizing["lots"] < 1:
@@ -595,7 +631,7 @@ def run_form() -> int:
             messagebox.showinfo("按 R 下单", "该品种尚未启用风险配置，无法计算手数")
             return
         try:
-            sizing = size_by_risk(float(form["risk_budget"].get()),
+            sizing = size_by_risk(current_budget(),
                                   _safe_int(form["stop_ticks"], 30) or 1,
                                   float(instrument["value_per_tick"]))
         except ValueError as exc:
@@ -644,6 +680,7 @@ def run_form() -> int:
             lines.extend(["", "提示："] + [f"  · {item}" for item in warnings])
         write_output("\n".join(lines))
         sync_increments()
+        sync_budget()
         fill_prices()
 
     def refresh() -> None:
@@ -841,6 +878,7 @@ def run_form() -> int:
                 f"最小跳动 {inst['min_tick']:g} / 上限 {inst['single_trade_limit_rmb']:g} 元"
             )
             sync_increments()
+            sync_budget()
             fill_prices()
             win.destroy()
 
@@ -1024,14 +1062,18 @@ def run_form() -> int:
 
     sizing_row = ttk.Frame(root)
     sizing_row.grid(row=5, column=0, sticky="w", **pad)
-    ttk.Label(sizing_row, text="1R 金额（元）").grid(row=0, column=0, sticky="w")
-    ttk.Spinbox(sizing_row, textvariable=form["risk_budget"], width=8, from_=0, to=1000000,
-                increment=50, command=update_sizing).grid(row=0, column=1, sticky="w", padx=4)
+    ttk.Checkbutton(sizing_row, text="1R = 单笔上限", variable=form["budget_from_limit"],
+                    command=lambda: (sync_budget(), update_sizing())).grid(row=0, column=0, sticky="w")
+    ttk.Label(sizing_row, text="1R 金额（元）").grid(row=0, column=1, sticky="w", padx=(12, 0))
+    spin = ttk.Spinbox(sizing_row, textvariable=form["risk_budget"], width=8, from_=0, to=1000000,
+                       increment=50, command=update_sizing)
+    spin.grid(row=0, column=2, sticky="w", padx=4)
+    budget_spin["widget"] = spin
     form["risk_budget"].trace_add("write", lambda *_args: update_sizing())
     ttk.Button(sizing_row, text="按 R 套用手数", command=apply_sizing,
-               width=14).grid(row=0, column=2, sticky="w", padx=8)
+               width=14).grid(row=0, column=3, sticky="w", padx=8)
     ttk.Label(sizing_row, textvariable=sizing_text, foreground="#0a5").grid(
-        row=0, column=3, sticky="w", padx=8)
+        row=0, column=4, sticky="w", padx=8)
 
     prices = ttk.Frame(root)
     prices.grid(row=6, column=0, sticky="w", **pad)
@@ -1081,7 +1123,8 @@ def run_form() -> int:
 
     def on_close() -> None:
         save_state({"tesseract_cmd": form["tesseract_cmd"].get(),
-                    "risk_budget": form["risk_budget"].get()})
+                    "risk_budget": form["risk_budget"].get(),
+                    "budget_from_limit": bool(form["budget_from_limit"].get())})
         root.destroy()
 
     on_link_toggle()
