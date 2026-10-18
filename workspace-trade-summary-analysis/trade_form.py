@@ -35,7 +35,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.10"
+FORM_VERSION = "1.11"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -388,6 +388,21 @@ def export_history_csv(rows: list[dict[str, Any]], path: Path) -> int:
     return len(rows)
 
 
+def find_duplicate_plan(plan: dict[str, Any], plans_dir: Path = PLAN_DIR) -> Path | None:
+    """Return an existing plan file with identical content, if any."""
+    if not plans_dir.exists():
+        return None
+    target = plan_fingerprint(plan)
+    for path in sorted(plans_dir.glob("plan-*.json")):
+        try:
+            other = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if plan_fingerprint(other) == target:
+            return path
+    return None
+
+
 def manual_prefill(recognized: dict[str, Any]) -> dict[str, str]:
     """Initial values for the manual-price dialog, taken from the last quote."""
     label = recognized.get("contract_label") or recognized.get("contract") or ""
@@ -635,6 +650,11 @@ def run_form() -> int:
             check()
         if not last_result:
             return
+        duplicate = find_duplicate_plan(last_result["plan"])
+        if duplicate is not None:
+            if not messagebox.askyesno("重复计划", f"相同内容的计划已存在：\n{duplicate.name}\n\n仍要再保存一份吗？"):
+                form["status"].set("已取消保存（内容相同的计划已存在）")
+                return
         PLAN_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         plan_path = PLAN_DIR / f"plan-{stamp}.json"

@@ -191,6 +191,17 @@ class FormLogicTests(unittest.TestCase):
         self.assertEqual(ids[0], 'abc')
         self.assertEqual(ids[1], 'abc-2')
 
+    def test_find_duplicate_plan(self):
+        import json
+        import tempfile
+        plan = {'variety': 'V', 'contract': 'V2701', 'direction': 'long', 'stop_loss': 4873}
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            self.assertIsNone(tf.find_duplicate_plan(plan, base))
+            (base / 'plan-a.json').write_text(json.dumps(plan), encoding='utf-8')
+            self.assertEqual(tf.find_duplicate_plan(plan, base).name, 'plan-a.json')
+            self.assertIsNone(tf.find_duplicate_plan({**plan, 'stop_loss': 4863}, base))
+
     def test_group_by_variety(self):
         rows = [{'variety': 'V'}, {'variety': 'RB'}, {'variety': 'V'}]
         groups = dict(tf.group_by_variety(rows))
