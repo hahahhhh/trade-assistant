@@ -10,6 +10,8 @@ Run on Windows:
 """
 from __future__ import annotations
 
+import csv
+import hashlib
 import json
 import re
 import tempfile
@@ -33,7 +35,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.7"
+FORM_VERSION = "1.8"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -260,6 +262,116 @@ def save_instrument_config(config: dict[str, Any], code: str, values: dict[str, 
     return wh6.load_config(path)
 
 
+HISTORY_COLUMNS = (
+    ("timestamp", "时间"),
+    ("contract", "合约"),
+    ("direction", "方向"),
+    ("size", "手数"),
+    ("entry", "入场"),
+    ("stop_loss", "止损"),
+    ("take_profit", "止盈"),
+    ("risk_rmb", "风险¥"),
+    ("status", "结果"),
+    ("smc_tag", "SMC"),
+    ("htf_bias", "HTF"),
+)
+
+
+def plan_fingerprint(plan: dict[str, Any]) -> str:
+    """Stable id so a saved plan file can be matched to its snapshot record."""
+    payload = json.dumps(plan, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _history_row(plan: dict[str, Any], snapshot: dict[str, Any] | None,
+                 path: Path | None) -> dict[str, Any]:
+    check = (snapshot or {}).get("check") or {}
+    risk = check.get("risk") or {}
+    timestamp = (snapshot or {}).get("created_at_utc")
+    if not timestamp and path is not None:
+        timestamp = datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+    return {
+        "timestamp": timestamp or "",
+        "variety": plan.get("variety") or "?",
+        "contract": plan.get("contract_label") or plan.get("contract") or "?",
+        "direction": plan.get("direction") or "",
+        "size": plan.get("size"),
+        "entry": risk.get("entry_price", plan.get("entry_price")),
+        "stop_loss": plan.get("stop_loss"),
+        "take_profit": plan.get("take_profit"),
+        "risk_rmb": risk.get("total_risk_rmb"),
+        "status": check.get("status") or "未检查",
+        "smc_tag": plan.get("smc_tag") or "",
+        "htf_bias": plan.get("htf_bias") or "",
+        "path": str(path) if path is not None else "",
+        "snapshot_id": (snapshot or {}).get("snapshot_id", ""),
+        "fingerprint": plan_fingerprint(plan),
+    }
+
+
+def _read_snapshots(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue
+    return records
+
+
+def load_history(snapshots_path: Path = SNAPSHOTS, plans_dir: Path = PLAN_DIR) -> list[dict[str, Any]]:
+    """Join saved plan files with their risk-check snapshots, newest first."""
+    snapshots = {}
+    for record in _read_snapshots(snapshots_path):
+        plan = record.get("plan")
+        if isinstance(plan, dict):
+            snapshots[plan_fingerprint(plan)] = record
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if plans_dir.exists():
+        for path in sorted(plans_dir.glob("plan-*.json")):
+            try:
+                plan = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            fingerprint = plan_fingerprint(plan)
+            seen.add(fingerprint)
+            rows.append(_history_row(plan, snapshots.get(fingerprint), path))
+    for fingerprint, record in snapshots.items():
+        if fingerprint in seen:
+            continue
+        plan = record.get("plan") or {}
+        rows.append(_history_row(plan, record, None))
+    rows.sort(key=lambda row: row.get("timestamp") or "", reverse=True)
+    return rows
+
+
+def group_by_variety(rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group history rows by variety, keeping the newest-first order inside."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("variety") or "?"), []).append(row)
+    return sorted(groups.items(), key=lambda item: item[0])
+
+
+def export_history_csv(rows: list[dict[str, Any]], path: Path) -> int:
+    """Write rows as UTF-8-BOM CSV so Excel shows Chinese correctly."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([label for _key, label in HISTORY_COLUMNS] + ["品种", "计划文件", "快照 ID"])
+        for row in rows:
+            writer.writerow([
+                "" if row.get(key) is None else row.get(key) for key, _label in HISTORY_COLUMNS
+            ] + [row.get("variety"), row.get("path"), row.get("snapshot_id")])
+    return len(rows)
+
+
 def manual_prefill(recognized: dict[str, Any]) -> dict[str, str]:
     """Initial values for the manual-price dialog, taken from the last quote."""
     label = recognized.get("contract_label") or recognized.get("contract") or ""
@@ -285,7 +397,7 @@ def _safe_int(var: Any, default: int) -> int:
 
 def run_form() -> int:
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     config = wh6.load_config()
     state = load_state()
@@ -630,6 +742,116 @@ def run_form() -> int:
             row=len(RISK_FIELDS) + 3, column=2, pady=(4, 12))
         load_values()
 
+    def open_history() -> None:
+        """Browse saved plans, grouped by variety, with delete and CSV export."""
+        win = tk.Toplevel(root)
+        win.title("历史交易计划")
+        win.geometry("1080x620")
+        rows = load_history()
+        variety_var = tk.StringVar(value="全部")
+        summary = tk.StringVar(value="")
+
+        top = ttk.Frame(win)
+        top.pack(fill="x", padx=8, pady=6)
+        ttk.Label(top, text="品种").pack(side="left")
+        codes = ["全部"] + [code for code, _ in group_by_variety(rows)]
+        variety_box = ttk.Combobox(top, textvariable=variety_var, values=codes,
+                                   width=10, state="readonly")
+        variety_box.pack(side="left", padx=6)
+
+        table = ttk.Treeview(win, show="tree headings",
+                             columns=[key for key, _ in HISTORY_COLUMNS])
+        table.column("#0", width=90, anchor="w")
+        table.heading("#0", text="品种")
+        widths = {"timestamp": 150, "contract": 90, "direction": 60, "size": 50,
+                  "entry": 80, "stop_loss": 80, "take_profit": 80, "risk_rmb": 80,
+                  "status": 70, "smc_tag": 100, "htf_bias": 70}
+        for key, label in HISTORY_COLUMNS:
+            table.column(key, width=widths.get(key, 80), anchor="w")
+            table.heading(key, text=label)
+        scroll = ttk.Scrollbar(win, orient="vertical", command=table.yview)
+        table.configure(yscrollcommand=scroll.set)
+        table.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=(0, 8))
+        scroll.pack(side="left", fill="y", padx=(0, 8), pady=(0, 8))
+
+        def render(*_args: Any) -> None:
+            table.delete(*table.get_children())
+            selected = variety_var.get()
+            shown = [row for row in rows if selected in ("全部", row.get("variety"))]
+            for variety, group in group_by_variety(shown):
+                parent = table.insert("", "end", text=f"{variety}（{len(group)}）", open=True)
+                for row in group:
+                    direction = "多" if row.get("direction") == "long" else ("空" if row.get("direction") == "short" else "")
+                    table.insert(parent, "end", iid=row["fingerprint"], text="", values=(
+                        (row.get("timestamp") or "")[:19].replace("T", " "),
+                        row.get("contract"), direction, row.get("size"),
+                        row.get("entry"), row.get("stop_loss"), row.get("take_profit"),
+                        row.get("risk_rmb"), row.get("status"), row.get("smc_tag"),
+                        row.get("htf_bias"),
+                    ))
+            counts = "，".join(f"{code} {len(group)} 条" for code, group in group_by_variety(rows))
+            summary.set(f"共 {len(rows)} 条｜{counts}" if rows else "还没有保存过计划")
+
+        def refresh(*_args: Any) -> None:
+            nonlocal rows
+            rows = load_history()
+            variety_box.configure(values=["全部"] + [code for code, _ in group_by_variety(rows)])
+            render()
+
+        def selected_rows() -> list[dict[str, Any]]:
+            wanted = set(table.selection())
+            return [row for row in rows if row["fingerprint"] in wanted]
+
+        def delete_selected() -> None:
+            chosen = selected_rows()
+            if not chosen:
+                messagebox.showinfo("删除", "请先选中要删除的计划")
+                return
+            if not messagebox.askyesno("删除", f"删除选中的 {len(chosen)} 条计划文件？\n快照记录会保留作为审计痕迹。"):
+                return
+            removed = 0
+            for row in chosen:
+                path = row.get("path")
+                if path:
+                    try:
+                        Path(path).unlink()
+                        removed += 1
+                    except OSError as exc:
+                        messagebox.showerror("删除失败", f"{path}\n{exc}")
+            refresh()
+            form["status"].set(f"已删除 {removed} 条计划文件（快照保留）")
+
+        def export() -> None:
+            chosen = selected_rows() or rows
+            if not chosen:
+                messagebox.showinfo("导出", "没有可导出的记录")
+                return
+            target = filedialog.asksaveasfilename(
+                parent=win, title="导出历史计划", defaultextension=".csv",
+                initialfile="trade_plans.csv", filetypes=[("CSV", "*.csv")])
+            if not target:
+                return
+            count = export_history_csv(chosen, Path(target))
+            messagebox.showinfo("导出", f"已导出 {count} 条到\n{target}")
+
+        def open_folder() -> None:
+            PLAN_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                import os
+                os.startfile(str(PLAN_DIR))  # type: ignore[attr-defined]
+            except (AttributeError, OSError) as exc:
+                messagebox.showinfo("目录", f"{PLAN_DIR}\n{exc}")
+
+        buttons = ttk.Frame(top)
+        buttons.pack(side="right")
+        for label, command in (("刷新", refresh), ("导出 CSV", export),
+                               ("删除选中", delete_selected), ("打开目录", open_folder)):
+            ttk.Button(buttons, text=label, command=command, width=10).pack(side="left", padx=4)
+
+        ttk.Label(win, textvariable=summary, foreground="#555").pack(anchor="w", padx=10, pady=(0, 4))
+        variety_box.bind("<<ComboboxSelected>>", render)
+        render()
+
     # ---- layout -----------------------------------------------------------
     # grid everywhere: pack(side="left") shrinks labels once the window is
     # narrower than the requested width, which truncated button text.
@@ -724,7 +946,8 @@ def run_form() -> int:
     actions.grid(row=9, column=0, sticky="w", **pad)
     for column, (label, command) in enumerate((
         ("刷新行情", refresh), ("手工填价", manual_market),
-        ("检查计划", check), ("保存计划", save), ("品种配置", edit_config),
+        ("检查计划", check), ("保存计划", save),
+        ("品种配置", edit_config), ("历史计划", open_history),
     )):
         ttk.Button(actions, text=label, command=command, width=12).grid(row=0, column=column, padx=6)
 

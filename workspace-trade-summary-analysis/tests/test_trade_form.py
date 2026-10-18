@@ -139,6 +139,72 @@ class FormLogicTests(unittest.TestCase):
             self.assertEqual(reloaded['instruments']['RB']['value_per_tick'], 10)
             self.assertTrue(path.with_suffix('.json.bak').exists())
 
+    def test_plan_fingerprint_is_stable_and_plan_specific(self):
+        a = {'variety': 'V', 'contract': 'V2701', 'stop_loss': 4873}
+        b = {'stop_loss': 4873, 'contract': 'V2701', 'variety': 'V'}
+        self.assertEqual(tf.plan_fingerprint(a), tf.plan_fingerprint(b))
+        self.assertNotEqual(tf.plan_fingerprint(a), tf.plan_fingerprint({**a, 'stop_loss': 4863}))
+
+    def test_load_history_joins_plan_files_with_snapshots(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            plans = base / 'plans'
+            plans.mkdir()
+            plan = {'variety': 'V', 'contract': 'V2701', 'contract_label': 'PVC2701',
+                    'direction': 'long', 'size': 1, 'stop_loss': 4873, 'take_profit': 4963,
+                    'smc_tag': 'FVG', 'htf_bias': 'long', 'market': {'bid1': 1, 'ask1': 2, 'last': 2}}
+            (plans / 'plan-20261018-120000.json').write_text(json.dumps(plan), encoding='utf-8')
+            snapshot = {'snapshot_id': 'sid-1', 'created_at_utc': '2026-10-18T04:00:00+00:00',
+                        'plan': plan, 'check': {'status': 'PASS', 'risk': {'entry_price': 4903, 'total_risk_rmb': 150}}}
+            snap_path = base / 'snapshots.jsonl'
+            snap_path.write_text(json.dumps(snapshot) + '\n', encoding='utf-8')
+
+            rows = tf.load_history(snap_path, plans)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['status'], 'PASS')
+            self.assertEqual(rows[0]['risk_rmb'], 150)
+            self.assertEqual(rows[0]['contract'], 'PVC2701')
+            self.assertEqual(rows[0]['snapshot_id'], 'sid-1')
+
+    def test_load_history_keeps_snapshot_without_plan_file(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            plan = {'variety': 'RB', 'contract': 'RB2701', 'direction': 'short', 'size': 2}
+            snapshot = {'snapshot_id': 'sid-2', 'created_at_utc': '2026-10-18T05:00:00+00:00',
+                        'plan': plan, 'check': {'status': 'REJECT', 'risk': None}}
+            snap_path = base / 'snapshots.jsonl'
+            snap_path.write_text(json.dumps(snapshot) + '\n', encoding='utf-8')
+            rows = tf.load_history(snap_path, base / 'missing-plans')
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['variety'], 'RB')
+            self.assertEqual(rows[0]['status'], 'REJECT')
+            self.assertEqual(rows[0]['path'], '')
+
+    def test_group_by_variety(self):
+        rows = [{'variety': 'V'}, {'variety': 'RB'}, {'variety': 'V'}]
+        groups = dict(tf.group_by_variety(rows))
+        self.assertEqual(list(groups), ['RB', 'V'])
+        self.assertEqual(len(groups['V']), 2)
+
+    def test_export_history_csv(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'out.csv'
+            rows = tf.load_history(Path(directory) / 'none.jsonl', Path(directory) / 'none')
+            rows.append({'timestamp': '2026-10-18T04:00:00', 'variety': 'V', 'contract': 'PVC2701',
+                         'direction': 'long', 'size': 1, 'entry': 4903, 'stop_loss': 4873,
+                         'take_profit': 4963, 'risk_rmb': 150, 'status': 'PASS',
+                         'smc_tag': 'FVG', 'htf_bias': 'long', 'path': '', 'snapshot_id': 'sid'})
+            count = tf.export_history_csv(rows, path)
+            self.assertEqual(count, 1)
+            text = path.read_text(encoding='utf-8-sig')
+            self.assertIn('PVC2701', text)
+            self.assertIn('PASS', text)
+
     def test_summarize_and_market_summary(self):
         result = tf.build_plan_from_form(fields(), RECOGNIZED, config)
         text = tf.summarize(result)
