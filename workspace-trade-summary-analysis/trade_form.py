@@ -158,6 +158,16 @@ def capture_and_recognize(tesseract_cmd: str | None, effort: str = "auto") -> di
     return best
 
 
+def manual_prefill(recognized: dict[str, Any]) -> dict[str, str]:
+    """Initial values for the manual-price dialog, taken from the last quote."""
+    label = recognized.get("contract_label") or recognized.get("contract") or ""
+    prefill = {"contract": str(label)}
+    for key in ("bid1", "ask1", "last"):
+        value = recognized.get(key)
+        prefill[key] = "" if value is None else f"{float(value):g}"
+    return prefill
+
+
 def blank_recognized(config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Manual fallback when OCR is unavailable; fields are typed by hand."""
     return {"source": "manual_entry", "validation": {"valid": False, "errors": ["manual market entry"], "warnings": []}}
@@ -214,6 +224,7 @@ def run_form() -> int:
     }
     recognized: dict[str, Any] = {}
     last_result: dict[str, Any] = {}
+    price_spins: dict[str, Any] = {}
 
     def invalidate(*_: Any) -> None:
         """Any edit after a check makes the old PASS/WARN/reject stale."""
@@ -242,6 +253,12 @@ def run_form() -> int:
         inst = config["instruments"].get(variety) if variety else None
         return float(inst["min_tick"]) if inst and inst.get("configured") else 1.0
 
+    def sync_increments() -> None:
+        """Price spin buttons step by the instrument's minimum tick."""
+        tick = current_tick()
+        for spin in price_spins.values():
+            spin.configure(increment=tick)
+
     def fill_prices() -> None:
         entry = estimate_entry(recognized, form["price_mode"].get(), form["direction"].get(), current_tick())
         if entry is None:
@@ -252,6 +269,7 @@ def run_form() -> int:
                                 _safe_int(form["stop_ticks"], 30), _safe_int(form["take_ticks"], 60))
         form["stop_loss"].set(f"{prices['stop_loss']:g}")
         form["take_profit"].set(f"{prices['take_profit']:g}")
+        sync_increments()
 
     def apply_market(data: dict[str, Any]) -> None:
         nonlocal recognized
@@ -278,6 +296,7 @@ def run_form() -> int:
         if warnings:
             lines.extend(["", "提示："] + [f"  · {item}" for item in warnings])
         write_output("\n".join(lines))
+        sync_increments()
         fill_prices()
 
     def refresh() -> None:
@@ -347,30 +366,42 @@ def run_form() -> int:
         form["status"].set(f"已保存（{last_result['check']['status']}）")
 
     def manual_market() -> None:
-        """Type bid/ask by hand when OCR is unavailable."""
+        """Type bid/ask by hand; prefill the last recognized quote."""
         win = tk.Toplevel(root)
         win.title("手工填价")
-        entries: dict[str, tk.StringVar] = {k: tk.StringVar() for k in ("contract", "bid1", "ask1", "last")}
+        prefill = manual_prefill(recognized)
+        entries: dict[str, tk.StringVar] = {key: tk.StringVar(value=value) for key, value in prefill.items()}
+
         for row, (key, label) in enumerate((("contract", "合约（如 V2701）"), ("bid1", "买一"), ("ask1", "卖一"), ("last", "最新"))):
             ttk.Label(win, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=4)
-            ttk.Entry(win, textvariable=entries[key], width=20).grid(row=row, column=1, padx=8, pady=4)
+            if key == "contract":
+                ttk.Entry(win, textvariable=entries[key], width=20).grid(row=row, column=1, padx=8, pady=4)
+            else:
+                ttk.Spinbox(win, textvariable=entries[key], width=18, from_=0, to=1000000,
+                            increment=1).grid(row=row, column=1, padx=8, pady=4)
 
         def accept() -> None:
             contract = entries["contract"].get().strip().upper()
             match = re.match(r"([A-Z]+)(\d+)$", contract)
             if not match:
-                messagebox.showerror("合约格式", "合约应形如 V2701")
+                messagebox.showerror("合约格式", "合约应形如 V2701 或 RB2701")
                 return
             data: dict[str, Any] = {
                 "variety": "V" if match.group(1) == "PVC" else match.group(1),
-                "contract": contract,
+                "contract": f"{'V' if match.group(1) == 'PVC' else match.group(1)}{match.group(2)}",
+                "contract_label": contract,
                 "source": "manual_entry",
                 "validation": {"valid": True, "errors": [], "warnings": ["manual market entry"]},
             }
             for key in ("bid1", "ask1", "last"):
                 raw = entries[key].get().strip()
-                if raw:
+                if not raw:
+                    continue
+                try:
                     data[key] = float(raw)
+                except ValueError:
+                    messagebox.showerror("数值格式", f"{key} 不是数字：{raw}")
+                    return
             apply_market(data)
             win.destroy()
 
@@ -417,7 +448,9 @@ def run_form() -> int:
     prices.grid(row=4, column=0, sticky="w", **pad)
     for column, (label, key) in enumerate((("入场", "entry_price"), ("止损", "stop_loss"), ("止盈", "take_profit"))):
         ttk.Label(prices, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 20, 4))
-        ttk.Entry(prices, textvariable=form[key], width=12).grid(row=0, column=column * 2 + 1, sticky="w")
+        spin = ttk.Spinbox(prices, textvariable=form[key], width=11, from_=0, to=1000000, increment=1)
+        spin.grid(row=0, column=column * 2 + 1, sticky="w")
+        price_spins[key] = spin
 
     smc = ttk.LabelFrame(root, text="SMC 标签")
     smc.grid(row=5, column=0, sticky="ew", **pad)

@@ -68,6 +68,17 @@ class FormLogicTests(unittest.TestCase):
         result = tf.build_plan_from_form(fields(stop_loss=4862.0), RECOGNIZED, config)
         self.assertEqual(result['check']['status'], 'REJECT')
 
+    def test_manual_prefill_uses_last_quote(self):
+        prefill = tf.manual_prefill(RECOGNIZED)
+        self.assertEqual(prefill['contract'], 'PVC2701')
+        self.assertEqual(prefill['bid1'], '4902')
+        self.assertEqual(prefill['ask1'], '4903')
+        self.assertEqual(prefill['last'], '4903')
+
+    def test_manual_prefill_blank_without_quote(self):
+        prefill = tf.manual_prefill({})
+        self.assertEqual(prefill, {'contract': '', 'bid1': '', 'ask1': '', 'last': ''})
+
     def test_summarize_and_market_summary(self):
         result = tf.build_plan_from_form(fields(), RECOGNIZED, config)
         text = tf.summarize(result)
