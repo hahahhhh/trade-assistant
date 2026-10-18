@@ -186,6 +186,16 @@ def run_form() -> int:
     except tk.TclError:
         root.geometry("980x820")
 
+    # Tk can measure CJK text with a narrower font than it renders, so button
+    # labels get clipped. Give every option explicit character width, inner
+    # padding and trailing blanks; all three are invisible slack.
+    def option_width(text: str) -> int:
+        return max(10, len(text) * 2 + 4)
+
+    def option(parent: Any, text: str, value: str, variable: Any, command: Any = None) -> Any:
+        return ttk.Radiobutton(parent, text=text + "   ", value=value, variable=variable,
+                               command=command, width=option_width(text), padding=(2, 2, 8, 2))
+
     form: dict[str, Any] = {
         "direction": tk.StringVar(value="long"),
         "price_mode": tk.StringVar(value="opponent"),
@@ -204,6 +214,19 @@ def run_form() -> int:
     }
     recognized: dict[str, Any] = {}
     last_result: dict[str, Any] = {}
+
+    def invalidate(*_: Any) -> None:
+        """Any edit after a check makes the old PASS/WARN/reject stale."""
+        if last_result:
+            last_result.clear()
+            status = form["status"].get()
+            if status.startswith(("检查完成", "已保存")):
+                form["status"].set("参数已修改，需重新点「检查计划」")
+
+    for key in ("direction", "price_mode", "size", "stop_ticks", "take_ticks",
+                "entry_price", "stop_loss", "take_profit", "smc_tag", "smc_custom",
+                "htf_bias", "is_add_on"):
+        form[key].trace_add("write", invalidate)
 
     market_var = tk.StringVar(value="尚未读取行情")
     output = tk.Text(root, height=10, width=90, state="disabled", wrap="word")
@@ -364,16 +387,17 @@ def run_form() -> int:
     direction_row.grid(row=1, column=0, sticky="w", **pad)
     ttk.Label(direction_row, text="方向").grid(row=0, column=0, sticky="w")
     for index, (label, value) in enumerate(DIRECTIONS, start=1):
-        ttk.Radiobutton(direction_row, text=label, value=value,
-                        variable=form["direction"], command=fill_prices).grid(row=0, column=index, sticky="w", padx=8)
-    ttk.Checkbutton(direction_row, text="加仓", variable=form["is_add_on"]).grid(row=0, column=3, sticky="w", padx=20)
+        option(direction_row, label, value, form["direction"], fill_prices).grid(
+            row=0, column=index, sticky="w", padx=8)
+    ttk.Checkbutton(direction_row, text="加仓", width=option_width("加仓"),
+                    variable=form["is_add_on"]).grid(row=0, column=3, sticky="w", padx=20)
 
     modes = ttk.Frame(root)
     modes.grid(row=2, column=0, sticky="w", **pad)
     ttk.Label(modes, text="价格").grid(row=0, column=0, sticky="w")
     for index, (label, value) in enumerate(PRICE_MODES, start=1):
-        ttk.Radiobutton(modes, text=label, value=value,
-                        variable=form["price_mode"], command=fill_prices).grid(row=0, column=index, sticky="w", padx=8)
+        option(modes, label, value, form["price_mode"], fill_prices).grid(
+            row=0, column=index, sticky="w", padx=8)
 
     nums = ttk.Frame(root)
     nums.grid(row=3, column=0, sticky="w", **pad)
@@ -397,7 +421,7 @@ def run_form() -> int:
     for column in range(4):
         smc.grid_columnconfigure(column, weight=1, uniform="smc")
     for index, tag in enumerate(smc_tags):
-        ttk.Radiobutton(smc, text=tag, value=tag, variable=form["smc_tag"]).grid(
+        option(smc, tag, tag, form["smc_tag"]).grid(
             row=index // 4, column=index % 4, sticky="w", padx=6, pady=3)
     custom_row = index // 4 + 1 if smc_tags else 0
     ttk.Label(smc, text="自定义").grid(row=custom_row, column=0, sticky="w", padx=6, pady=(6, 4))
@@ -409,7 +433,7 @@ def run_form() -> int:
     for column in range(4):
         htf.grid_columnconfigure(column, weight=1, uniform="htf")
     for index, (label, value) in enumerate(HTF_CHOICES):
-        ttk.Radiobutton(htf, text=label, value=value, variable=form["htf_bias"]).grid(
+        option(htf, label, value, form["htf_bias"]).grid(
             row=0, column=index, sticky="w", padx=6, pady=4)
 
     tess = ttk.Frame(root)
