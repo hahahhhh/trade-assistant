@@ -47,6 +47,12 @@ class FormLogicTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tf.suggest_prices(4903, 'sideways', 1, 30, 60)
 
+    def test_ticks_between(self):
+        self.assertEqual(tf.ticks_between(19890, 19790, 5), 20)
+        self.assertEqual(tf.ticks_between(19890, 19890, 5), 1)
+        with self.assertRaises(ValueError):
+            tf.ticks_between(1, 2, 0)
+
     def test_estimate_entry_by_mode(self):
         self.assertEqual(tf.estimate_entry(RECOGNIZED, 'opponent', 'long', 1), 4903)
         self.assertEqual(tf.estimate_entry(RECOGNIZED, 'opponent', 'short', 1), 4902)

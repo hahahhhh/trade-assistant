@@ -33,8 +33,9 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.5"
+FORM_VERSION = "1.6"
 
+STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
 PRICE_MODES = (("对手价", "opponent"), ("排队价", "queue"), ("最新价", "last"), ("手工价", "manual"))
 HTF_CHOICES = (("多头", "long"), ("空头", "short"), ("震荡", "ranging"), ("不清晰", "unclear"))
@@ -63,6 +64,13 @@ def suggest_prices(entry: float, direction: str, tick: float, stop_ticks: int, t
     stop = round(entry + stop_sign * stop_ticks * tick, 8)
     take = round(entry + take_sign * take_ticks * tick, 8)
     return {"stop_loss": stop, "take_profit": take}
+
+
+def ticks_between(entry: float, price: float, tick: float) -> int:
+    """Whole ticks between two prices, at least one."""
+    if tick <= 0:
+        raise ValueError("tick must be positive")
+    return max(1, int(round(abs(price - entry) / tick)))
 
 
 def estimate_entry(recognized: dict[str, Any], price_mode: str, direction: str, tick: float) -> float | None:
@@ -296,6 +304,7 @@ def run_form() -> int:
         "price_mode": tk.StringVar(value="opponent"),
         "size": tk.IntVar(value=1),
         "stop_ticks": tk.IntVar(value=30),
+        "step_ticks": tk.IntVar(value=1),
         "take_ticks": tk.IntVar(value=60),
         "entry_price": tk.StringVar(),
         "stop_loss": tk.StringVar(),
@@ -339,10 +348,11 @@ def run_form() -> int:
         return float(inst["min_tick"]) if inst and inst.get("configured") else 1.0
 
     def sync_increments() -> None:
-        """Price spin buttons step by the instrument's minimum tick."""
-        tick = current_tick()
+        """Price spin buttons step by tick × chosen step, so large price bases stay quick."""
+        step = _safe_int(form["step_ticks"], 1) or 1
+        increment = current_tick() * step
         for spin in price_spins.values():
-            spin.configure(increment=tick)
+            spin.configure(increment=increment)
 
     def fill_prices() -> None:
         entry = estimate_entry(recognized, form["price_mode"].get(), form["direction"].get(), current_tick())
@@ -425,8 +435,25 @@ def run_form() -> int:
             "is_add_on": bool(form["is_add_on"].get()),
         }
 
+    def refresh_ticks_from_prices() -> None:
+        """Keep the tick boxes truthful after the price boxes are edited directly."""
+        try:
+            entry = float(form["entry_price"].get())
+        except ValueError:
+            return
+        tick = current_tick()
+        for price_key, ticks_key in (("stop_loss", "stop_ticks"), ("take_profit", "take_ticks")):
+            raw = form[price_key].get().strip()
+            if not raw:
+                continue
+            try:
+                form[ticks_key].set(ticks_between(entry, float(raw), tick))
+            except ValueError:
+                continue
+
     def check() -> None:
         nonlocal last_result
+        refresh_ticks_from_prices()
         try:
             result = build_plan_from_form(collect(), recognized, config)
         except ValueError as exc:
@@ -600,6 +627,11 @@ def run_form() -> int:
         ttk.Label(nums, text=label).grid(row=0, column=column * 2, sticky="w", padx=(0 if column == 0 else 20, 4))
         ttk.Spinbox(nums, from_=start, to=end, width=width, textvariable=form[key],
                     command=fill_prices).grid(row=0, column=column * 2 + 1, sticky="w")
+    ttk.Label(nums, text="价格调整步长（跳）").grid(row=0, column=6, sticky="w", padx=(20, 4))
+    step_box = ttk.Combobox(nums, textvariable=form["step_ticks"], values=STEP_CHOICES,
+                            width=4, state="readonly")
+    step_box.grid(row=0, column=7, sticky="w")
+    step_box.bind("<<ComboboxSelected>>", lambda _event: (sync_increments(), fill_prices()))
 
     prices = ttk.Frame(root)
     prices.grid(row=4, column=0, sticky="w", **pad)
