@@ -47,6 +47,25 @@ class FormLogicTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tf.suggest_prices(4903, 'sideways', 1, 30, 60)
 
+    def test_size_by_risk_rounds_down(self):
+        sizing = tf.size_by_risk(400, 25, 5)
+        self.assertEqual(sizing['per_lot_risk'], 125)
+        self.assertAlmostEqual(sizing['raw_lots'], 3.2)
+        self.assertEqual(sizing['lots'], 3)
+        self.assertEqual(sizing['risk_rmb'], 375)
+        self.assertEqual(sizing['remainder'], 25)
+
+    def test_size_by_risk_exact_division_keeps_lots(self):
+        self.assertEqual(tf.size_by_risk(300, 20, 5)['lots'], 3)
+
+    def test_size_by_risk_below_one_lot(self):
+        self.assertEqual(tf.size_by_risk(100, 25, 5)['lots'], 0)
+
+    def test_size_by_risk_rejects_bad_inputs(self):
+        for args in ((0, 25, 5), (400, 0, 5), (400, 25, 0), (-1, 25, 5)):
+            with self.assertRaises(ValueError):
+                tf.size_by_risk(*args)
+
     def test_linked_take_ticks(self):
         self.assertEqual(tf.linked_take_ticks(20, 2), 40)
         self.assertEqual(tf.linked_take_ticks(30, 1.5), 45)
