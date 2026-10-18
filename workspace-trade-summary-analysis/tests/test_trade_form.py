@@ -229,6 +229,43 @@ class FormLogicTests(unittest.TestCase):
         self.assertEqual(ids[0], 'abc')
         self.assertEqual(ids[1], 'abc-2')
 
+    def test_remove_snapshot_records_with_backup(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshots.jsonl"
+            lines = [json.dumps({'snapshot_id': f'sid-{i}', 'plan': {'variety': 'V'}}) for i in range(4)]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            removed = tf.remove_snapshot_records(path, {'sid-1', 'sid-3'})
+            self.assertEqual(removed, 2)
+            left = [json.loads(l)['snapshot_id'] for l in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(left, ['sid-0', 'sid-2'])
+            backup = path.with_suffix('.jsonl.bak')
+            self.assertTrue(backup.exists())
+            self.assertEqual(len(backup.read_text(encoding="utf-8").splitlines()), 4)
+
+    def test_remove_snapshot_records_no_match(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshots.jsonl"
+            path.write_text(json.dumps({'snapshot_id': 'a'}) + "\n", encoding="utf-8")
+            self.assertEqual(tf.remove_snapshot_records(path, {'zzz'}), 0)
+            self.assertEqual(tf.remove_snapshot_records(Path(directory) / 'missing.jsonl', {'a'}), 0)
+
+    def test_history_row_without_plan_file_has_empty_path(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            snapshot = {'snapshot_id': 'sid-x', 'created_at_utc': '2026-10-18T06:00:00+00:00',
+                        'plan': {'variety': 'V', 'contract': 'V2701'}, 'check': {'status': 'WARN'}}
+            snap_path = base / 'snapshots.jsonl'
+            snap_path.write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
+            rows = tf.load_history(snap_path, base / 'no-plans')
+            self.assertEqual(rows[0]['path'], '')
+            self.assertEqual(rows[0]['snapshot_id'], 'sid-x')
+
     def test_find_duplicate_plan(self):
         import json
         import tempfile

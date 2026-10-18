@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "2.2"
+FORM_VERSION = "2.3"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -433,6 +433,33 @@ def export_history_csv(rows: list[dict[str, Any]], path: Path) -> int:
                 "" if row.get(key) is None else row.get(key) for key, _label in HISTORY_COLUMNS
             ] + [row.get("variety"), row.get("path"), row.get("snapshot_id")])
     return len(rows)
+
+
+def remove_snapshot_records(path: Path, snapshot_ids: set[str]) -> int:
+    """Drop snapshot lines by id, keeping a .bak copy. Returns the count removed."""
+    ids = {sid for sid in snapshot_ids if sid}
+    if not path.exists() or not ids:
+        return 0
+    original = path.read_text(encoding="utf-8").splitlines()
+    kept: list[str] = []
+    removed = 0
+    for line in original:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            kept.append(line)
+            continue
+        if record.get("snapshot_id") in ids:
+            removed += 1
+        else:
+            kept.append(line)
+    if not removed:
+        return 0
+    path.with_suffix(path.suffix + ".bak").write_text("\n".join(original) + "\n", encoding="utf-8")
+    path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+    return removed
 
 
 def find_duplicate_plan(plan: dict[str, Any], plans_dir: Path = PLAN_DIR) -> Path | None:
@@ -1172,7 +1199,9 @@ def run_form() -> int:
                         row.get("htf_bias"),
                     ))
             counts = "，".join(f"{code} {len(group)} 条" for code, group in group_by_variety(rows))
-            summary.set(f"共 {len(rows)} 条｜{counts}" if rows else "还没有保存过计划")
+            orphan = sum(1 for row in rows if not row.get("path"))
+            extra = f"｜其中 {orphan} 条仅在快照中" if orphan else ""
+            summary.set(f"共 {len(rows)} 条｜{counts}{extra}" if rows else "还没有保存过计划")
 
         def refresh(*_args: Any) -> None:
             nonlocal rows
@@ -1188,21 +1217,64 @@ def run_form() -> int:
             if not chosen:
                 messagebox.showinfo("删除", "请先选中要删除的计划", parent=win)
                 return
-            if not messagebox.askyesno("删除", f"删除选中的 {len(chosen)} 条计划文件？\n快照记录会保留作为审计痕迹。", parent=win):
+            with_file = [row for row in chosen if row.get("path")]
+            snapshot_only = [row for row in chosen if not row.get("path")]
+            question = (f"选中 {len(chosen)} 条：\n"
+                        f"· 有计划文件 {len(with_file)} 条\n"
+                        f"· 仅存在于快照 {len(snapshot_only)} 条\n\n继续删除？")
+            if not messagebox.askyesno("删除", question, parent=win):
                 return
-            removed = 0
-            for row in chosen:
-                path = row.get("path")
-                if path:
-                    try:
-                        Path(path).unlink()
-                        removed += 1
-                    except OSError as exc:
-                        messagebox.showerror("删除失败", f"{path}\n{exc}", parent=win)
+
+            removed_files = 0
+            failures: list[str] = []
+            for row in with_file:
+                target = Path(row["path"])
+                try:
+                    target.unlink()
+                    removed_files += 1
+                    continue
+                except FileNotFoundError:
+                    removed_files += 1          # already gone; treat as done
+                    continue
+                except OSError:
+                    pass
+                try:                            # Windows: clear read-only then retry
+                    target.chmod(0o666)
+                    target.unlink()
+                    removed_files += 1
+                except OSError as exc:
+                    failures.append(f"{target.name}: {exc}")
+
+            removed_snaps = 0
+            ids = {row.get("snapshot_id") for row in snapshot_only if row.get("snapshot_id")}
+            if ids:
+                if messagebox.askyesno(
+                        "删除快照",
+                        f"这 {len(ids)} 条只存在于快照文件，没有计划文件。\n"
+                        f"要从快照中永久删除吗？（会先备份 .bak）",
+                        parent=win):
+                    removed_snaps = remove_snapshot_records(SNAPSHOTS, ids)
+
             refresh()
             win.lift()
             win.focus_force()
-            form["status"].set(f"已删除 {removed} 条计划文件（快照保留）")
+            report = f"已删除：计划文件 {removed_files} 个，快照记录 {removed_snaps} 条"
+            form["status"].set(report)
+            if failures:
+                messagebox.showerror("部分文件删除失败", "\n".join(failures[:8]), parent=win)
+            if not removed_files and not removed_snaps:
+                messagebox.showinfo("没有变化",
+                                    "选中的记录没有可删除的内容（可能已被删除或文件被占用）。",
+                                    parent=win)
+            else:
+                deleted = {row.get("fingerprint") for row in chosen}
+                twins = [row for row in rows if row.get("fingerprint") in deleted]
+                if twins:
+                    messagebox.showinfo(
+                        "提示",
+                        f"列表里还有 {len(twins)} 条内容完全相同的记录（可能是重复保存）。\n"
+                        f"如需一并清理，请再选中删除。",
+                        parent=win)
 
         def export() -> None:
             chosen = selected_rows() or rows
