@@ -35,7 +35,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "1.9"
+FORM_VERSION = "1.10"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -869,7 +869,10 @@ def run_form() -> int:
 
         ttk.Label(win, textvariable=summary, foreground="#555").pack(anchor="w", padx=10, pady=(0, 4))
         variety_box.bind("<<ComboboxSelected>>", render)
-        render()
+        try:
+            render()
+        except Exception as exc:  # keep the window usable and explain what broke
+            messagebox.showerror("历史计划", f"列表渲染失败：{exc}")
 
     # ---- layout -----------------------------------------------------------
     # grid everywhere: pack(side="left") shrinks labels once the window is
@@ -984,6 +987,8 @@ def run_form() -> int:
 
 
 def main() -> int:
+    # Printed on every launch so a stale copy is obvious immediately.
+    print(f"trade_form v{FORM_VERSION}  ({Path(__file__).resolve()})", flush=True)
     try:
         return run_form()
     except ImportError as exc:
