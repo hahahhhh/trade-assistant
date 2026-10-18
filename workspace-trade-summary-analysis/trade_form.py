@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "2.0"
+FORM_VERSION = "2.1"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -84,10 +84,18 @@ def resolve_budget(limit: float | None, manual: str, use_limit: bool) -> float:
     return value
 
 
-def size_by_risk(budget: float, stop_ticks: int, value_per_tick: float) -> dict[str, Any]:
+def per_lot_cost(instrument: dict[str, Any]) -> float:
+    """Round-trip fees plus slippage buffer for one lot."""
+    return (float(instrument.get("round_trip_cost_per_lot", 0) or 0)
+            + float(instrument.get("slippage_buffer_per_lot", 0) or 0))
+
+
+def size_by_risk(budget: float, stop_ticks: int, value_per_tick: float,
+                 cost_per_lot: float = 0.0) -> dict[str, Any]:
     """Lots affordable inside a 1R budget, rounded down.
 
-    risk per lot = stop ticks x value per tick; lots must not overshoot 1R.
+    risk per lot = stop ticks x value per tick + fees/slippage; lots must not
+    overshoot 1R, otherwise the shown risk would disagree with check_plan.
     """
     if budget <= 0:
         raise ValueError("1R 金额必须大于 0")
@@ -95,7 +103,7 @@ def size_by_risk(budget: float, stop_ticks: int, value_per_tick: float) -> dict[
         raise ValueError("止损跳数必须大于 0")
     if value_per_tick <= 0:
         raise ValueError("每跳价值必须大于 0（请先在「品种配置」里填写）")
-    per_lot = stop_ticks * value_per_tick
+    per_lot = stop_ticks * value_per_tick + max(0.0, cost_per_lot)
     raw_lots = budget / per_lot
     lots = int(math.floor(raw_lots + 1e-9))
     return {
@@ -517,18 +525,22 @@ def risk_preview(fields: dict[str, Any], recognized: dict[str, Any],
         return {"error": str(exc)}
     limit = float(instrument["single_trade_limit_rmb"])
     value_per_tick = float(instrument["value_per_tick"])
+    cost = per_lot_cost(instrument)
     ticks = risk["ticks"]
+    total = risk["total_risk_rmb"]
     return {
         "entry": entry,
         "stop": stop,
         "size": size,
         "ticks": ticks,
-        "per_lot_risk": ticks * value_per_tick,
-        "total_risk": risk["total_risk_rmb"],
+        "per_lot_risk": total / size if size else 0.0,
+        "total_risk": total,
         "limit": limit,
-        "ratio": risk_ratio(risk["total_risk_rmb"], limit),
-        "level": risk_level(risk_ratio(risk["total_risk_rmb"], limit)),
-        "max_ticks_at_size": int(max(0, limit) // (value_per_tick * size)) if size else 0,
+        "ratio": risk_ratio(total, limit),
+        "level": risk_level(risk_ratio(total, limit)),
+        "max_ticks_at_size": (
+            int(max(0.0, limit - cost * size) // (value_per_tick * size)) if size else 0
+        ),
     }
 
 
@@ -661,12 +673,18 @@ def run_form() -> int:
         metrics["remain"].set(f"¥{remain:g}")
         metrics["cap"].set(f"{preview['max_ticks_at_size']} 跳（{preview['max_ticks_at_size'] * current_tick():g} 点）")
         ratio_var.set(min(preview["ratio"], 1.5) * 100)
+        note = widgets.get("ratio_note")
         if preview["level"] == "over":
             ratio_note.set(f"超出上限 ¥{preview['total_risk'] - preview['limit']:g}")
+            colour = THEME["danger"]
         elif preview["level"] == "warn":
             ratio_note.set("接近上限，注意成本")
+            colour = THEME["warn"]
         else:
             ratio_note.set(f"占上限 {preview['ratio']:.0%}")
+            colour = THEME["muted"]
+        if note is not None:
+            note.configure(foreground=colour)
 
     def invalidate(*_: Any) -> None:
         """Any edit after a check makes the old PASS/WARN/reject stale."""
@@ -775,13 +793,15 @@ def run_form() -> int:
         value_per_tick = float(instrument["value_per_tick"])
         try:
             budget = current_budget()
-            sizing = size_by_risk(budget, stop_ticks, value_per_tick)
+            sizing = size_by_risk(budget, stop_ticks, value_per_tick, per_lot_cost(instrument))
         except ValueError as exc:
             sizing_text.set(f"1R 计算：{exc}")
             return
         limit = float(instrument["single_trade_limit_rmb"])
         suffix = "（= 单笔上限）" if form["budget_from_limit"].get() else ""
-        text = (f"1R ¥{budget:g}{suffix} ÷（{stop_ticks} 跳 × ¥{value_per_tick:g}）"
+        cost = per_lot_cost(instrument)
+        cost_part = f"+¥{cost:g} 成本" if cost else ""
+        text = (f"1R ¥{budget:g}{suffix} ÷（{stop_ticks} 跳 × ¥{value_per_tick:g}{cost_part}）"
                 f"= ¥{sizing['per_lot_risk']:g}/手 → {sizing['raw_lots']:.2f} 手"
                 f" → {sizing['lots']} 手（风险 ¥{sizing['risk_rmb']:g}，余 ¥{sizing['remainder']:g}）")
         if sizing["lots"] < 1:
@@ -802,7 +822,8 @@ def run_form() -> int:
         try:
             sizing = size_by_risk(current_budget(),
                                   _safe_int(form["stop_ticks"], 30) or 1,
-                                  float(instrument["value_per_tick"]))
+                                  float(instrument["value_per_tick"]),
+                                  per_lot_cost(instrument))
         except ValueError as exc:
             messagebox.showerror("按 R 下单", str(exc))
             return
@@ -1411,8 +1432,9 @@ def run_form() -> int:
     bar_frame = ttk.Frame(panel)
     bar_frame.grid(row=2, column=0, sticky="ew")
     ttk.Progressbar(bar_frame, maximum=100, variable=ratio_var).pack(fill="x")
-    ttk.Label(bar_frame, textvariable=ratio_note, foreground=THEME["muted"]).pack(
-        anchor="w", pady=(2, 0))
+    note_label = ttk.Label(bar_frame, textvariable=ratio_note, foreground=THEME["muted"])
+    note_label.pack(anchor="w", pady=(2, 0))
+    widgets["ratio_note"] = note_label
 
     reasons_frame = ttk.LabelFrame(panel, text="检查发现", padding=6)
     reasons_frame.grid(row=3, column=0, sticky="nsew", pady=8)

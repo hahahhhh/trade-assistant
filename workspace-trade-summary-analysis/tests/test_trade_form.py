@@ -261,6 +261,25 @@ class FormLogicTests(unittest.TestCase):
             self.assertIn('PVC2701', text)
             self.assertIn('PASS', text)
 
+    def test_size_by_risk_includes_fees(self):
+        sizing = tf.size_by_risk(500, 30, 5, 1.0)
+        self.assertEqual(sizing['per_lot_risk'], 151)
+        self.assertEqual(sizing['lots'], 3)
+        self.assertEqual(sizing['risk_rmb'], 453)
+        self.assertEqual(sizing['remainder'], 47)
+
+    def test_risk_preview_matches_cost_aware_check(self):
+        import copy
+        cfg = copy.deepcopy(config)
+        cfg['instruments']['V']['round_trip_cost_per_lot'] = 1
+        cfg['instruments']['V']['single_trade_limit_rmb'] = 500
+        preview = tf.risk_preview(
+            {'direction': 'long', 'price_mode': 'opponent', 'size': 3, 'stop_loss': 4873.0},
+            RECOGNIZED, cfg)
+        self.assertEqual(preview['total_risk'], 453)
+        self.assertEqual(preview['per_lot_risk'], 151)
+        self.assertEqual(preview['max_ticks_at_size'], 33)
+
     def test_risk_ratio_and_level(self):
         self.assertEqual(tf.risk_ratio(75, 200), 0.375)
         self.assertEqual(tf.risk_ratio(10, 0), 0.0)

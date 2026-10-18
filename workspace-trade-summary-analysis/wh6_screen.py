@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # direct file import from the test runner
     load_config, check_plan, save_snapshot = _module.load_config, _module.check_plan, _module.save_snapshot
     calculate_risk = _module.calculate_risk
 
-TOOL_VERSION = "2026-10.14"
+TOOL_VERSION = "2026-10.15"
 PROCESS_NAME = "mytrader_spqh.exe"
 APP_NAME = "wh6"
 
