@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "3.4"
+FORM_VERSION = "3.5"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -719,6 +719,7 @@ def run_form() -> int:
     ratio_note = tk.StringVar(value="")
     checked_at = tk.StringVar(value="尚未检查")
     apply_text = tk.StringVar(value="套用建议手数")
+    editing = {"on": False}
     equity_hint = tk.StringVar(value="选择品种后显示上限来源")
     version_info = tk.StringVar(value=f"v{FORM_VERSION} · 尚未检查")
 
@@ -836,10 +837,34 @@ def run_form() -> int:
         for spin in price_spins.values():
             spin.configure(increment=increment)
 
+    def set_entry(value: str) -> None:
+        editing["on"] = True
+        try:
+            form["entry_price"].set(value)
+        finally:
+            editing["on"] = False
+
+    def on_entry_edit(*_args: Any) -> None:
+        """Typing an entry price means the user wants a manual fill price."""
+        if editing["on"]:
+            return
+        if form["price_mode"].get() != "manual":
+            form["price_mode"].set("manual")
+        fill_prices()
+
     def fill_prices() -> None:
-        entry = estimate_entry(recognized, form["price_mode"].get(), form["direction"].get(), current_tick())
+        mode = form["price_mode"].get()
+        if mode == "manual":
+            raw = form["entry_price"].get().strip()
+            try:
+                entry = float(raw) if raw else None
+            except ValueError:
+                entry = None
+        else:
+            entry = estimate_entry(recognized, mode, form["direction"].get(), current_tick())
         if entry is None:
-            form["entry_price"].set("")
+            if mode != "manual":
+                set_entry("")
             return
         stop_ticks = _safe_int(form["stop_ticks"], 30) or 1
         if form["link_take"].get():
@@ -855,13 +880,15 @@ def run_form() -> int:
         else:
             take_ticks = _safe_int(form["take_ticks"], 60) or 1
             rr_preview.set("止盈独立设置")
-        form["entry_price"].set(f"{entry:g}")
+        set_entry(f"{entry:g}")
         prices = suggest_prices(entry, form["direction"].get(), current_tick(), stop_ticks, take_ticks)
         form["stop_loss"].set(f"{prices['stop_loss']:g}")
         form["take_profit"].set(f"{prices['take_profit']:g}")
         sync_increments()
         update_sizing()
         update_metrics()
+
+    form["entry_price"].trace_add("write", on_entry_edit)
 
     def update_equity_hint() -> None:
         """Explain how the current cap is derived, given the instrument mode."""
