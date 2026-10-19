@@ -68,6 +68,81 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(result["bid1"], 4902)
         self.assertEqual(result["last"], 4903)
 
+    def test_effective_limit_fixed_mode(self):
+        limit, budget = ta.effective_trade_limit(CONFIG["instruments"]["V"], 50000)
+        self.assertEqual(limit, 200)
+        self.assertEqual(budget["mode"], "fixed")
+
+    def test_effective_limit_percent_mode(self):
+        instrument = dict(CONFIG["instruments"]["V"])
+        instrument.update({"risk_budget_mode": "percent_of_equity", "risk_percent": 2})
+        limit, budget = ta.effective_trade_limit(instrument, 50000)
+        self.assertEqual(limit, 1000)
+        self.assertEqual(budget["equity_rmb"], 50000)
+        self.assertEqual(budget["percent"], 2)
+
+    def test_effective_limit_percent_requires_equity(self):
+        instrument = dict(CONFIG["instruments"]["V"])
+        instrument.update({"risk_budget_mode": "percent_of_equity", "risk_percent": 2})
+        with self.assertRaises(ValueError):
+            ta.effective_trade_limit(instrument, None)
+        with self.assertRaises(ValueError):
+            ta.effective_trade_limit(instrument, 0)
+
+    def test_effective_limit_rejects_bad_percent(self):
+        instrument = dict(CONFIG["instruments"]["V"])
+        instrument.update({"risk_budget_mode": "percent_of_equity"})
+        for bad in (0, -1, 101, None):
+            instrument["risk_percent"] = bad
+            with self.assertRaises(ValueError):
+                ta.effective_trade_limit(instrument, 50000)
+
+    def test_effective_limit_rejects_unknown_mode(self):
+        instrument = dict(CONFIG["instruments"]["V"])
+        instrument["risk_budget_mode"] = "whatever"
+        with self.assertRaises(ValueError):
+            ta.effective_trade_limit(instrument, 50000)
+
+    def test_percent_plan_uses_equity_limit(self):
+        instrument = dict(CONFIG["instruments"]["V"])
+        instrument.update({"risk_budget_mode": "percent_of_equity", "risk_percent": 2})
+        cfg = dict(CONFIG)
+        cfg["instruments"] = dict(CONFIG["instruments"])
+        cfg["instruments"]["V"] = instrument
+        plan = self.plan(stop_loss=4873, size=3)
+        result = ta.check_plan(plan, cfg, equity=50000)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["risk"]["single_trade_limit_rmb"], 1000)
+        self.assertEqual(result["budget"]["mode"], "percent_of_equity")
+
+    def test_percent_plan_rejected_without_equity(self):
+        instrument = dict(CONFIG["instruments"]["V"])
+        instrument.update({"risk_budget_mode": "percent_of_equity", "risk_percent": 2})
+        cfg = dict(CONFIG)
+        cfg["instruments"] = dict(CONFIG["instruments"])
+        cfg["instruments"]["V"] = instrument
+        result = ta.check_plan(self.plan(), cfg)
+        self.assertEqual(result["status"], "REJECT")
+        self.assertIn("总资金", " ".join(result["hard_blocks"]))
+
+    def test_daily_loss_limit_modes(self):
+        value, budget = ta.daily_loss_limit(CONFIG, 50000)
+        self.assertEqual(value, 400.0)
+        self.assertEqual(budget["mode"], "fixed")
+        cfg = dict(CONFIG)
+        cfg["global_limits"] = dict(CONFIG["global_limits"])
+        cfg["global_limits"].update({"daily_loss_mode": "percent_of_equity", "daily_loss_percent": 5})
+        value, budget = ta.daily_loss_limit(cfg, 50000)
+        self.assertEqual(value, 2500)
+        self.assertEqual(budget["percent"], 5)
+
+    def test_account_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "account.json"
+            self.assertEqual(ta.load_account(path), {})
+            ta.save_account(50000, path)
+            self.assertEqual(ta.load_account(path)["equity_rmb"], 50000)
+
     def test_save_snapshot_appends(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "snapshots.jsonl"

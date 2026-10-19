@@ -4,7 +4,9 @@
   "global_limits": {
     "daily_open_limit": 5,
     "daily_loss_limit_rmb": 400,
-    "max_total_exposure_rmb": 600
+    "max_total_exposure_rmb": 600,
+    "daily_loss_mode": "fixed",
+    "daily_loss_percent": 5
   },
   "smc_tags": [
     "FVG",
@@ -31,7 +33,9 @@
       "single_trade_limit_rmb": 200,
       "round_trip_cost_per_lot": 0,
       "slippage_buffer_per_lot": 0,
-      "configured": true
+      "configured": true,
+      "risk_budget_mode": "fixed",
+      "risk_percent": 2
     },
     "LH": {
       "value_per_point": 16,
@@ -40,7 +44,9 @@
       "single_trade_limit_rmb": 200,
       "round_trip_cost_per_lot": 0,
       "slippage_buffer_per_lot": 0,
-      "configured": true
+      "configured": true,
+      "risk_budget_mode": "fixed",
+      "risk_percent": 2
     },
     "FG": {
       "value_per_point": 20,
@@ -49,22 +55,34 @@
       "single_trade_limit_rmb": 200,
       "round_trip_cost_per_lot": 0,
       "slippage_buffer_per_lot": 0,
-      "configured": true
+      "configured": true,
+      "risk_budget_mode": "fixed",
+      "risk_percent": 2
     },
     "JD": {
-      "configured": false
+      "configured": false,
+      "risk_budget_mode": "fixed",
+      "risk_percent": null
     },
     "RU": {
-      "configured": false
+      "configured": false,
+      "risk_budget_mode": "fixed",
+      "risk_percent": null
     },
     "MA": {
-      "configured": false
+      "configured": false,
+      "risk_budget_mode": "fixed",
+      "risk_percent": null
     },
     "C": {
-      "configured": false
+      "configured": false,
+      "risk_budget_mode": "fixed",
+      "risk_percent": null
     },
     "JM": {
-      "configured": false
+      "configured": false,
+      "risk_budget_mode": "fixed",
+      "risk_percent": null
     },
     "RB": {
       "name": "螺纹钢",
@@ -76,7 +94,9 @@
       "round_trip_cost_per_lot": 0,
       "slippage_buffer_per_lot": 0,
       "configured": false,
-      "note": "Fill value_per_point/min_tick/single_trade_limit_rmb before enabling"
+      "note": "Fill value_per_point/min_tick/single_trade_limit_rmb before enabling",
+      "risk_budget_mode": "fixed",
+      "risk_percent": null
     }
   }
 }

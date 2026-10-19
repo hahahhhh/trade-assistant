@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "2.4"
+FORM_VERSION = "3.0"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -82,6 +82,31 @@ def resolve_budget(limit: float | None, manual: str, use_limit: bool) -> float:
     if value <= 0:
         raise ValueError("1R 金额必须大于 0")
     return value
+
+
+ACCOUNT_PATH = ROOT / "data" / "account.json"
+
+
+def tf_account_equity() -> float | None:
+    """Equity from data/account.json, or None when never set."""
+    try:
+        payload = json.loads(ACCOUNT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = payload.get("equity_rmb")
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def tf_save_equity(equity: float) -> None:
+    if equity <= 0:
+        raise ValueError("总资金必须大于 0")
+    ACCOUNT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"equity_rmb": float(equity),
+               "updated_at": datetime.now().isoformat(timespec="seconds")}
+    ACCOUNT_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def per_lot_cost(instrument: dict[str, Any]) -> float:
@@ -151,7 +176,8 @@ def estimate_entry(recognized: dict[str, Any], price_mode: str, direction: str, 
         return None
 
 
-def build_plan_from_form(fields: dict[str, Any], recognized: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def build_plan_from_form(fields: dict[str, Any], recognized: dict[str, Any],
+                         config: dict[str, Any], equity: float | None = None) -> dict[str, Any]:
     """Single source of truth for the form's plan + risk check."""
     plan = wh6.build_plan_draft(
         recognized,
@@ -165,7 +191,7 @@ def build_plan_from_form(fields: dict[str, Any], recognized: dict[str, Any], con
         htf_bias=fields.get("htf_bias"),
         is_add_on=bool(fields.get("is_add_on")),
     )
-    result = wh6.check_plan(plan, config)
+    result = wh6.check_plan(plan, config, equity)
     return {"plan": plan, "check": result}
 
 
@@ -241,6 +267,9 @@ def instrument_form_values(config: dict[str, Any], code: str) -> dict[str, Any]:
         value = inst.get(key)
         values[key] = "" if value is None else f"{float(value):g}"
     values["configured"] = bool(inst.get("configured"))
+    values["risk_budget_mode"] = inst.get("risk_budget_mode", "fixed")
+    percent = inst.get("risk_percent")
+    values["risk_percent"] = "" if percent is None else f"{float(percent):g}"
     return values
 
 
@@ -272,9 +301,21 @@ def build_instrument_config(config: dict[str, Any], code: str, values: dict[str,
             raise ValueError(f"「{label}」不能为负")
         return value
 
+    mode = str(values.get("risk_budget_mode") or "fixed")
+    if mode not in ("fixed", "percent_of_equity"):
+        raise ValueError(f"未知的风险预算模式：{mode}")
+    percent = None
+    if mode == "percent_of_equity":
+        percent = number("risk_percent", "总资金比例（%）", positive=True)
+        if percent is not None and percent > 100:
+            raise ValueError("「总资金比例（%）」不能超过 100")
+        if enabled and percent is None:
+            raise ValueError("百分比模式必须填写总资金比例")
+
     value_per_point = number("value_per_point", "每点价值（元）", positive=True)
     min_tick = number("min_tick", "最小跳动（点）", positive=True)
-    limit = number("single_trade_limit_rmb", "单笔上限（元）", positive=True)
+    limit = number("single_trade_limit_rmb", "单笔上限（元）", positive=True,
+                   required=(mode == "fixed"))
     cost = number("round_trip_cost_per_lot", "手续费/手（元）", positive=False, required=False) or 0.0
     slippage = number("slippage_buffer_per_lot", "滑点缓冲/手（元）", positive=False, required=False) or 0.0
 
@@ -288,7 +329,10 @@ def build_instrument_config(config: dict[str, Any], code: str, values: dict[str,
         "single_trade_limit_rmb": limit,
         "round_trip_cost_per_lot": cost,
         "slippage_buffer_per_lot": slippage,
-        "configured": bool(enabled and value_per_point and min_tick and limit),
+        "risk_budget_mode": mode,
+        "risk_percent": percent,
+        "configured": bool(enabled and value_per_point and min_tick
+                           and (limit if mode == "fixed" else percent)),
     })
     if instrument["value_per_tick"] is not None:
         instrument["value_per_tick"] = round(instrument["value_per_tick"], 8)
@@ -526,12 +570,16 @@ def status_badge(status: str | None, stale: bool) -> tuple[str, str, str]:
 
 
 def risk_preview(fields: dict[str, Any], recognized: dict[str, Any],
-                 config: dict[str, Any]) -> dict[str, Any]:
+                 config: dict[str, Any], equity: float | None = None) -> dict[str, Any]:
     """Live risk numbers without running the full rule check."""
     variety = recognized.get("variety")
     instrument = config["instruments"].get(variety) if variety else None
     if not instrument or not instrument.get("configured"):
         return {"error": "该品种尚未启用风险配置"}
+    try:
+        limit, budget = wh6.effective_trade_limit(instrument, equity)
+    except ValueError as exc:
+        return {"error": str(exc)}
     tick = float(instrument["min_tick"])
     direction = fields.get("direction")
     entry = estimate_entry(recognized, fields.get("price_mode") or "opponent", direction, tick)
@@ -550,7 +598,6 @@ def risk_preview(fields: dict[str, Any], recognized: dict[str, Any],
         risk = wh6.calculate_risk(entry, stop, size, instrument)
     except (ValueError, KeyError) as exc:
         return {"error": str(exc)}
-    limit = float(instrument["single_trade_limit_rmb"])
     value_per_tick = float(instrument["value_per_tick"])
     cost = per_lot_cost(instrument)
     ticks = risk["ticks"]
@@ -568,6 +615,8 @@ def risk_preview(fields: dict[str, Any], recognized: dict[str, Any],
         "max_ticks_at_size": (
             int(max(0.0, limit - cost * size) // (value_per_tick * size)) if size else 0
         ),
+        "budget": budget,
+        "limit": limit,
     }
 
 
@@ -619,6 +668,7 @@ def run_form() -> int:
         return ttk.Radiobutton(parent, text=text + "   ", value=value, variable=variable,
                                command=command, width=option_width(text), padding=(2, 2, 8, 2))
 
+    account_equity = tf_account_equity()
     form: dict[str, Any] = {
         "direction": tk.StringVar(value="long"),
         "price_mode": tk.StringVar(value="opponent"),
@@ -637,6 +687,7 @@ def run_form() -> int:
         "smc_custom": tk.StringVar(),
         "htf_bias": tk.StringVar(value="long"),
         "is_add_on": tk.BooleanVar(value=False),
+        "equity": tk.StringVar(value="" if account_equity is None else f"{account_equity:g}"),
         "tesseract_cmd": tk.StringVar(value=state.get("tesseract_cmd", DEFAULT_TESSERACT)),
         "status": tk.StringVar(value=f"v{FORM_VERSION} 已就绪：点击“刷新行情”读取 WH6，或直接手工填价"),
     }
@@ -657,7 +708,7 @@ def run_form() -> int:
         "meta": tk.StringVar(value="点击「刷新行情」或手工填价"),
     }
     badge_text = tk.StringVar(value="未检查")
-    metrics = {key: tk.StringVar(value="—") for key in ("per_lot", "total", "limit", "remain", "cap")}
+    metrics = {key: tk.StringVar(value="—") for key in ("per_lot", "total", "limit", "remain", "cap", "daily")}
     ratio_var = tk.DoubleVar(value=0.0)
     ratio_note = tk.StringVar(value="")
     checked_at = tk.StringVar(value="尚未检查")
@@ -685,17 +736,31 @@ def run_form() -> int:
             ratio_var.set(0)
             ratio_note.set("")
             return
-        preview = risk_preview(fields, recognized, config)
+        preview = risk_preview(fields, recognized, config, current_equity())
         if "error" in preview:
-            for key in ("per_lot", "total", "remain", "cap"):
+            for key in ("per_lot", "total", "remain", "cap", "limit", "daily"):
                 metrics[key].set("—")
-            metrics["limit"].set("—")
             ratio_var.set(0)
             ratio_note.set(preview["error"])
             return
+        budget = preview.get("budget") or {}
         metrics["per_lot"].set(f"¥{preview['per_lot_risk']:g}")
         metrics["total"].set(f"¥{preview['total_risk']:g}")
-        metrics["limit"].set(f"¥{preview['limit']:g}")
+        if budget.get("mode") == "percent_of_equity":
+            metrics["limit"].set(f"¥{preview['limit']:g}（{budget['percent']:g}%）")
+        else:
+            metrics["limit"].set(f"¥{preview['limit']:g}")
+        try:
+            daily, daily_budget = wh6.daily_loss_limit(config, current_equity())
+        except ValueError as exc:
+            metrics["daily"].set(str(exc))
+        else:
+            if daily is None:
+                metrics["daily"].set("—")
+            elif daily_budget.get("mode") == "percent_of_equity":
+                metrics["daily"].set(f"¥{daily:g}（{daily_budget['percent']:g}%）")
+            else:
+                metrics["daily"].set(f"¥{daily:g}")
         remain = preview["limit"] - preview["total_risk"]
         metrics["remain"].set(f"¥{remain:g}")
         metrics["cap"].set(f"{preview['max_ticks_at_size']} 跳（{preview['max_ticks_at_size'] * current_tick():g} 点）")
@@ -791,22 +856,57 @@ def run_form() -> int:
         update_sizing()
         update_metrics()
 
+    def on_equity_change(_event: Any = None) -> None:
+        """Persist equity, then recompute every limit that depends on it."""
+        equity = current_equity()
+        if equity is not None:
+            try:
+                tf_save_equity(equity)
+            except (ValueError, OSError):
+                pass
+        last_result.clear()
+        set_badge(None, True)
+        sync_budget()
+        update_sizing()
+        update_metrics()
+
+    def current_equity() -> float | None:
+        raw = form["equity"].get().strip()
+        if not raw:
+            return None
+        try:
+            value = float(raw)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    def effective_limit_for(instrument: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+        return wh6.effective_trade_limit(instrument, current_equity())
+
     def sync_budget() -> None:
         """Keep 1R equal to the instrument cap when the checkbox is on."""
         variety = recognized.get("variety")
         instrument = config["instruments"].get(variety) if variety else None
         spin = budget_spin.get("widget")
         if form["budget_from_limit"].get() and instrument and instrument.get("configured"):
-            limit = instrument.get("single_trade_limit_rmb")
+            try:
+                limit, _budget = effective_limit_for(instrument)
+            except ValueError:
+                limit = None
             if limit is not None:
-                form["risk_budget"].set(f"{float(limit):g}")
+                form["risk_budget"].set(f"{limit:g}")
         if spin is not None:
             spin.configure(state="disabled" if form["budget_from_limit"].get() else "normal")
 
     def current_budget() -> float:
         variety = recognized.get("variety")
         instrument = config["instruments"].get(variety) if variety else None
-        limit = instrument.get("single_trade_limit_rmb") if instrument else None
+        limit = None
+        if instrument:
+            try:
+                limit, _budget = effective_limit_for(instrument)
+            except ValueError:
+                limit = None
         return resolve_budget(limit, form["risk_budget"].get(), bool(form["budget_from_limit"].get()))
 
     def update_sizing() -> None:
@@ -985,7 +1085,7 @@ def run_form() -> int:
         if form["link_take"].get():
             fill_prices()
         try:
-            result = build_plan_from_form(collect(), recognized, config)
+            result = build_plan_from_form(collect(), recognized, config, current_equity())
         except ValueError as exc:
             form["status"].set(str(exc))
             return
@@ -1083,6 +1183,18 @@ def run_form() -> int:
         enabled = tk.BooleanVar(value=False)
         per_tick = tk.StringVar(value="每跳 -")
         name = tk.StringVar(value="")
+        mode_var = tk.StringVar(value="fixed")
+        percent_var = tk.StringVar(value="")
+        spins: dict[str, Any] = {}
+
+        def update_mode_state(*_args: Any) -> None:
+            percent_mode = mode_var.get() == "percent_of_equity"
+            limit_spin = spins.get("single_trade_limit_rmb")
+            if limit_spin is not None:
+                limit_spin.configure(state="disabled" if percent_mode else "normal")
+            percent_spin = spins.get("percent")
+            if percent_spin is not None:
+                percent_spin.configure(state="normal" if percent_mode else "disabled")
 
         def update_per_tick(*_args: Any) -> None:
             try:
@@ -1098,9 +1210,12 @@ def run_form() -> int:
             for key, _label in RISK_FIELDS:
                 fields[key].set(values[key])
             enabled.set(values["configured"])
+            mode_var.set(values.get("risk_budget_mode", "fixed"))
+            percent_var.set(values.get("risk_percent", ""))
             inst = config["instruments"].get(code, {})
             name.set(inst.get("name") or code)
             update_per_tick()
+            update_mode_state()
 
         ttk.Label(win, text="品种").grid(row=0, column=0, sticky="w", padx=8, pady=6)
         combo = ttk.Combobox(win, textvariable=code_var, values=codes, width=10, state="readonly")
@@ -1108,40 +1223,61 @@ def run_form() -> int:
         combo.bind("<<ComboboxSelected>>", load_values)
         ttk.Label(win, textvariable=name, foreground="#555").grid(row=0, column=2, sticky="w", padx=8)
 
-        for index, (key, label) in enumerate(RISK_FIELDS, start=1):
+        mode_frame = ttk.LabelFrame(win, text="风险预算方式（二选一）", padding=6)
+        mode_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(4, 2))
+        ttk.Radiobutton(mode_frame, text="固定金额", value="fixed", variable=mode_var,
+                        command=update_mode_state).grid(row=0, column=0, sticky="w", padx=4)
+        ttk.Radiobutton(mode_frame, text="按总资金百分比", value="percent_of_equity",
+                        variable=mode_var, command=update_mode_state).grid(
+            row=0, column=1, sticky="w", padx=12)
+        ttk.Label(mode_frame, text="比例%").grid(row=0, column=2, sticky="e", padx=(12, 4))
+        percent_spin = ttk.Spinbox(mode_frame, textvariable=percent_var, width=8,
+                                   from_=0.1, to=100, increment=0.1)
+        percent_spin.grid(row=0, column=3, sticky="w")
+        spins["percent"] = percent_spin
+
+        for index, (key, label) in enumerate(RISK_FIELDS, start=2):
             ttk.Label(win, text=label).grid(row=index, column=0, sticky="w", padx=8, pady=4)
             spin = ttk.Spinbox(win, textvariable=fields[key], width=14, from_=0, to=1000000, increment=1)
             spin.grid(row=index, column=1, sticky="w", padx=8, pady=4)
+            spins[key] = spin
             if key in ("value_per_point", "min_tick"):
                 fields[key].trace_add("write", update_per_tick)
 
-        ttk.Label(win, textvariable=per_tick).grid(row=len(RISK_FIELDS) + 1, column=1, sticky="w", padx=8, pady=4)
+        base = 2 + len(RISK_FIELDS)
+        ttk.Label(win, textvariable=per_tick).grid(row=base, column=1, sticky="w", padx=8, pady=4)
         ttk.Checkbutton(win, text="启用该品种（启用后才会参与风险检查）",
-                        variable=enabled).grid(row=len(RISK_FIELDS) + 2, column=0, columnspan=3, sticky="w", padx=8, pady=6)
+                        variable=enabled).grid(row=base + 1, column=0, columnspan=3,
+                                               sticky="w", padx=8, pady=6)
 
         def save() -> None:
             nonlocal config
             values = {key: fields[key].get() for key, _label in RISK_FIELDS}
             values["configured"] = bool(enabled.get())
+            values["risk_budget_mode"] = mode_var.get()
+            values["risk_percent"] = percent_var.get()
             try:
                 config = save_instrument_config(config, code_var.get(), values)
             except (ValueError, OSError) as exc:
                 messagebox.showerror("配置有误", str(exc), parent=win)
                 return
             inst = config["instruments"][code_var.get()]
-            form["status"].set(
-                f"配置已保存：{code_var.get()} 每点 {inst['value_per_point']:g} 元 / "
-                f"最小跳动 {inst['min_tick']:g} / 上限 {inst['single_trade_limit_rmb']:g} 元"
-            )
+            if inst.get("risk_budget_mode") == "percent_of_equity":
+                summary = (f"配置已保存：{code_var.get()} 每点 {inst['value_per_point']:g} 元 / "
+                           f"最小跳动 {inst['min_tick']:g} / 上限按总资金 {inst['risk_percent']:g}%")
+            else:
+                summary = (f"配置已保存：{code_var.get()} 每点 {inst['value_per_point']:g} 元 / "
+                           f"最小跳动 {inst['min_tick']:g} / 上限 {inst['single_trade_limit_rmb']:g} 元")
+            form["status"].set(summary)
             sync_increments()
             sync_budget()
             fill_prices()
             win.destroy()
 
         ttk.Button(win, text="保存", command=save, width=10).grid(
-            row=len(RISK_FIELDS) + 3, column=0, columnspan=2, pady=(4, 12))
+            row=base + 2, column=0, columnspan=2, pady=(4, 12))
         ttk.Button(win, text="取消", command=win.destroy, width=10).grid(
-            row=len(RISK_FIELDS) + 3, column=2, pady=(4, 12))
+            row=base + 2, column=2, pady=(4, 12))
         load_values()
 
     def open_history() -> None:
@@ -1501,18 +1637,28 @@ def run_form() -> int:
     panel = ttk.Frame(body)
     panel.grid(row=0, column=1, sticky="nsew")
     panel.grid_columnconfigure(0, weight=1)
-    panel.grid_rowconfigure(3, weight=1)
+    panel.grid_rowconfigure(4, weight=1)
 
     badge = tk.Label(panel, textvariable=badge_text, font=THEME["font_badge"],
                      foreground=THEME["muted"], background="#f2f2f2", padx=10, pady=12, anchor="center")
     badge.grid(row=0, column=0, sticky="ew")
     widgets["badge"] = badge
 
+    equity_row = ttk.Frame(panel)
+    equity_row.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    ttk.Label(equity_row, text="总资金（元）").pack(side="left")
+    equity_spin = ttk.Spinbox(equity_row, textvariable=form["equity"], width=12,
+                              from_=0, to=100000000, increment=1000, command=on_equity_change)
+    equity_spin.pack(side="left", padx=6)
+    ttk.Label(equity_row, text="百分比模式使用", foreground=THEME["muted"]).pack(side="left")
+    form["equity"].trace_add("write", lambda *_args: on_equity_change())
+
     metric_frame = ttk.LabelFrame(panel, text="风险", padding=8)
-    metric_frame.grid(row=1, column=0, sticky="ew", pady=8)
+    metric_frame.grid(row=2, column=0, sticky="ew", pady=8)
     metric_frame.grid_columnconfigure(1, weight=1)
     metric_rows = (("每手风险", "per_lot"), ("计划风险", "total"),
-                   ("单笔上限", "limit"), ("剩余预算", "remain"))
+                   ("单笔上限", "limit"), ("剩余预算", "remain"),
+                   ("日亏损上限", "daily"))
     for row, (label, key) in enumerate(metric_rows):
         ttk.Label(metric_frame, text=label, foreground=THEME["muted"]).grid(
             row=row, column=0, sticky="w", pady=1)
@@ -1524,21 +1670,21 @@ def run_form() -> int:
         row=len(metric_rows), column=1, sticky="e", pady=(6, 0))
 
     bar_frame = ttk.Frame(panel)
-    bar_frame.grid(row=2, column=0, sticky="ew")
+    bar_frame.grid(row=3, column=0, sticky="ew")
     ttk.Progressbar(bar_frame, maximum=100, variable=ratio_var).pack(fill="x")
     note_label = ttk.Label(bar_frame, textvariable=ratio_note, foreground=THEME["muted"])
     note_label.pack(anchor="w", pady=(2, 0))
     widgets["ratio_note"] = note_label
 
     reasons_frame = ttk.LabelFrame(panel, text="检查发现", padding=6)
-    reasons_frame.grid(row=3, column=0, sticky="nsew", pady=8)
+    reasons_frame.grid(row=4, column=0, sticky="nsew", pady=8)
     reasons_text = tk.Text(reasons_frame, height=6, wrap="word", state="disabled", relief="flat")
     reasons_text.pack(fill="both", expand=True)
     widgets["reasons"] = reasons_text
     _fill_text("reasons", "尚未检查")
 
     action_frame = ttk.Frame(panel)
-    action_frame.grid(row=4, column=0, sticky="ew")
+    action_frame.grid(row=5, column=0, sticky="ew")
     ttk.Button(action_frame, text="检查计划  Ctrl+Enter", command=check).pack(fill="x", pady=(0, 6))
     save_button = ttk.Button(action_frame, text="保存计划  Ctrl+S", command=save, state="disabled")
     save_button.pack(fill="x")

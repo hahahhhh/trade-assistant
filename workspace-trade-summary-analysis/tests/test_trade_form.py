@@ -317,6 +317,59 @@ class FormLogicTests(unittest.TestCase):
         self.assertEqual(preview['per_lot_risk'], 151)
         self.assertEqual(preview['max_ticks_at_size'], 33)
 
+    def test_instrument_values_include_budget_mode(self):
+        values = tf.instrument_form_values(config, 'V')
+        self.assertEqual(values['risk_budget_mode'], 'fixed')
+        self.assertEqual(values['risk_percent'], '2')
+
+    def test_build_config_percent_mode(self):
+        values = {'risk_budget_mode': 'percent_of_equity', 'risk_percent': '2',
+                  'value_per_point': '5', 'min_tick': '1',
+                  'single_trade_limit_rmb': '', 'configured': True}
+        updated = tf.build_instrument_config(config, 'V', values)
+        instrument = updated['instruments']['V']
+        self.assertEqual(instrument['risk_budget_mode'], 'percent_of_equity')
+        self.assertEqual(instrument['risk_percent'], 2.0)
+        self.assertTrue(instrument['configured'])
+
+    def test_build_config_percent_requires_ratio(self):
+        values = {'risk_budget_mode': 'percent_of_equity', 'risk_percent': '',
+                  'value_per_point': '5', 'min_tick': '1', 'configured': True}
+        with self.assertRaises(ValueError):
+            tf.build_instrument_config(config, 'V', values)
+
+    def test_risk_preview_percent_mode_uses_equity(self):
+        import copy
+        cfg = copy.deepcopy(config)
+        cfg['instruments']['V'].update({'risk_budget_mode': 'percent_of_equity', 'risk_percent': 2})
+        preview = tf.risk_preview(
+            {'direction': 'long', 'price_mode': 'opponent', 'size': 3, 'stop_loss': 4873.0},
+            RECOGNIZED, cfg, 50000)
+        self.assertEqual(preview['limit'], 1000)
+        self.assertEqual(preview['budget']['mode'], 'percent_of_equity')
+
+    def test_risk_preview_percent_mode_without_equity_errors(self):
+        import copy
+        cfg = copy.deepcopy(config)
+        cfg['instruments']['V'].update({'risk_budget_mode': 'percent_of_equity', 'risk_percent': 2})
+        preview = tf.risk_preview(
+            {'direction': 'long', 'price_mode': 'opponent', 'size': 1, 'stop_loss': 4873.0},
+            RECOGNIZED, cfg, None)
+        self.assertIn('总资金', preview.get('error', ''))
+
+    def test_equity_roundtrip(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'account.json'
+            original = tf.ACCOUNT_PATH
+            tf.ACCOUNT_PATH = path
+            try:
+                self.assertIsNone(tf.tf_account_equity())
+                tf.tf_save_equity(50000)
+                self.assertEqual(tf.tf_account_equity(), 50000)
+            finally:
+                tf.ACCOUNT_PATH = original
+
     def test_risk_ratio_and_level(self):
         self.assertEqual(tf.risk_ratio(75, 200), 0.375)
         self.assertEqual(tf.risk_ratio(10, 0), 0.0)

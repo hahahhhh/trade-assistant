@@ -22,11 +22,84 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "data" / "trade_assistant_config.json"
 DEFAULT_SNAPSHOTS = ROOT / "data" / "trade_assistant" / "pre_trade_snapshots.jsonl"
+DEFAULT_ACCOUNT = ROOT / "data" / "account.json"
+
+
+def load_account(path: Path = DEFAULT_ACCOUNT) -> dict[str, Any]:
+    """Account equity is private, so it lives outside the committed config."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_account(equity_rmb: float, path: Path = DEFAULT_ACCOUNT) -> None:
+    if equity_rmb <= 0:
+        raise ValueError("总资金必须大于 0")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"equity_rmb": float(equity_rmb),
+               "updated_at": datetime.now(timezone.utc).isoformat()}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def effective_trade_limit(instrument: dict[str, Any],
+                          equity: float | None = None) -> tuple[float, dict[str, Any]]:
+    """Per-trade cap for one instrument, plus the provenance of that number.
+
+    Two modes exist and exactly one applies; a percent-mode instrument never
+    silently falls back to the fixed amount.
+    """
+    mode = instrument.get("risk_budget_mode", "fixed")
+    if mode == "fixed":
+        limit = instrument.get("single_trade_limit_rmb")
+        if limit is None or float(limit) <= 0:
+            raise ValueError("固定金额模式缺少有效的单笔上限")
+        return float(limit), {"mode": "fixed", "limit_rmb": float(limit)}
+    if mode == "percent_of_equity":
+        percent = instrument.get("risk_percent")
+        if percent is None or not 0 < float(percent) <= 100:
+            raise ValueError("百分比模式的总资金比例必须在 0~100 之间")
+        if equity is None or float(equity) <= 0:
+            raise ValueError("百分比模式需要先填写总资金")
+        limit = math.floor(float(equity) * float(percent) / 100)
+        if limit <= 0:
+            raise ValueError("按总资金比例计算的单笔上限不足 ¥1")
+        return float(limit), {"mode": "percent_of_equity", "equity_rmb": float(equity),
+                              "percent": float(percent), "limit_rmb": float(limit)}
+    raise ValueError(f"未知的风险预算模式：{mode}")
+
+
+def daily_loss_limit(config: dict[str, Any],
+                     equity: float | None = None) -> tuple[float | None, dict[str, Any]]:
+    """Daily loss cap, either fixed or a share of equity."""
+    limits = config.get("global_limits", {})
+    mode = limits.get("daily_loss_mode", "fixed")
+    if mode == "fixed":
+        value = limits.get("daily_loss_limit_rmb")
+        return (float(value) if value is not None else None,
+                {"mode": "fixed", "limit_rmb": value})
+    if mode == "percent_of_equity":
+        percent = limits.get("daily_loss_percent")
+        if percent is None or not 0 < float(percent) <= 100:
+            raise ValueError("日亏损比例必须在 0~100 之间")
+        if equity is None or float(equity) <= 0:
+            raise ValueError("日亏损按比例计算时需要先填写总资金")
+        value = math.floor(float(equity) * float(percent) / 100)
+        return float(value), {"mode": "percent_of_equity", "equity_rmb": float(equity),
+                              "percent": float(percent), "limit_rmb": float(value)}
+    raise ValueError(f"未知的日亏损模式：{mode}")
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     for code, item in data["instruments"].items():
+        mode = item.get("risk_budget_mode", "fixed")
+        if mode not in ("fixed", "percent_of_equity"):
+            raise ValueError(f"{code} config mismatch: unknown risk_budget_mode {mode!r}")
+        if mode == "percent_of_equity" and item.get("configured", False):
+            percent = item.get("risk_percent")
+            if percent is None or not 0 < float(percent) <= 100:
+                raise ValueError(f"{code} config mismatch: risk_percent must be in (0, 100]")
         if not item.get("configured", False):
             continue
         expected = item["value_per_point"] * item["min_tick"]
@@ -112,7 +185,8 @@ def validate_market(market: dict[str, Any], instrument: dict[str, Any]) -> list[
     return errors
 
 
-def check_plan(plan: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def check_plan(plan: dict[str, Any], config: dict[str, Any],
+               equity: float | None = None) -> dict[str, Any]:
     hard: list[str] = []
     warnings: list[str] = []
     code = str(plan.get("variety", "")).upper()
@@ -124,6 +198,10 @@ def check_plan(plan: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         return {"status": "REJECT", "hard_blocks": [f"Contract {plan['contract']} does not match variety {code}"], "warnings": [], "risk": None}
     if not instrument.get("configured", False):
         return {"status": "REJECT", "hard_blocks": [f"Risk config for variety {code} is not configured"], "warnings": [], "risk": None}
+    try:
+        trade_limit, budget = effective_trade_limit(instrument, equity)
+    except ValueError as exc:
+        return {"status": "REJECT", "hard_blocks": [str(exc)], "warnings": [], "risk": None}
     market = plan.get("market", {})
     hard.extend(validate_market(market, instrument))
     if plan.get("direction") not in ("long", "short"):
@@ -152,7 +230,7 @@ def check_plan(plan: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
                 hard.append("Short position stop loss must be above entry")
             else:
                 risk = calculate_risk(entry, stop, int(plan["size"]), instrument)
-                limit = float(instrument["single_trade_limit_rmb"])
+                limit = trade_limit
                 if risk["total_risk_rmb"] > limit + 1e-9:
                     hard.append(f"Plan risk ¥{risk['total_risk_rmb']:.2f} exceeds {code} limit ¥{limit:.2f}")
                 elif risk["total_risk_rmb"] >= limit * 0.95:
@@ -175,7 +253,13 @@ def check_plan(plan: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     if confidence is not None and float(confidence) < float(config.get("ocr_min_confidence", 0.85)):
         warnings.append("OCR confidence below threshold; manually verify all recognized fields")
     status = "REJECT" if hard else ("WARN" if warnings else "PASS")
-    return {"status": status, "hard_blocks": hard, "warnings": warnings, "risk": risk}
+    try:
+        _daily, daily_budget = daily_loss_limit(config, equity)
+    except ValueError as exc:
+        daily_budget = {"error": str(exc)}
+    result = {"status": status, "hard_blocks": hard, "warnings": warnings, "risk": risk,
+              "budget": budget, "daily_budget": daily_budget}
+    return result
 
 
 def parse_ocr_text(text: str) -> dict[str, Any]:

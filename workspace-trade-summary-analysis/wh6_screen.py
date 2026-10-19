@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from trade_assistant import load_config, check_plan, save_snapshot, calculate_risk
+    from trade_assistant import (load_config, check_plan, save_snapshot, calculate_risk,
+                                 load_account, effective_trade_limit, daily_loss_limit)
 except ModuleNotFoundError:  # direct file import from the test runner
     import importlib.util
     _spec = importlib.util.spec_from_file_location("trade_assistant", Path(__file__).with_name("trade_assistant.py"))
@@ -26,8 +27,11 @@ except ModuleNotFoundError:  # direct file import from the test runner
     _spec.loader.exec_module(_module)
     load_config, check_plan, save_snapshot = _module.load_config, _module.check_plan, _module.save_snapshot
     calculate_risk = _module.calculate_risk
+    load_account = _module.load_account
+    effective_trade_limit = _module.effective_trade_limit
+    daily_loss_limit = _module.daily_loss_limit
 
-TOOL_VERSION = "2026-10.18"
+TOOL_VERSION = "2026-10.19"
 PROCESS_NAME = "mytrader_spqh.exe"
 APP_NAME = "wh6"
 
@@ -556,6 +560,7 @@ def main() -> int:
     p.add_argument("--htf-bias", choices=("long", "short", "ranging", "unclear"))
     p.add_argument("--is-add-on", action="store_true")
     p.add_argument("--plan-check", action="store_true", help="run the risk check on the generated plan and save a snapshot")
+    p.add_argument("--equity", type=float, help="account equity for percent-based risk budgets (default: data/account.json)")
     p.add_argument("--snapshots", type=Path, help="snapshot JSONL path used with --plan-check")
     args = p.parse_args()
     if args.list_windows:
@@ -648,7 +653,8 @@ def main() -> int:
                 args.plan_out.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 print(f"plan draft written: {args.plan_out}", flush=True)
                 if args.plan_check:
-                    check_result = check_plan(plan, config)
+                    equity = args.equity if args.equity is not None else load_account().get("equity_rmb")
+                    check_result = check_plan(plan, config, equity)
                     if args.snapshots:
                         check_result["snapshot_id"] = save_snapshot(plan, check_result, args.snapshots)
                     else:
