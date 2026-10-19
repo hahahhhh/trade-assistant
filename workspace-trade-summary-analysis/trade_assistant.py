@@ -8,7 +8,6 @@ immutable pre-trade snapshots.
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
 import math
