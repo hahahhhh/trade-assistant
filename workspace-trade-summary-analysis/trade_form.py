@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "3.3"
+FORM_VERSION = "3.4"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -669,10 +669,10 @@ def run_form() -> int:
                                command=command, width=option_width(text), padding=(2, 2, 8, 2))
 
     def check_option(parent: Any, text: str, variable: Any, command: Any = None) -> Any:
-        # Same CJK measurement problem as radiobuttons: pad the request so the
-        # rendered label cannot be clipped.
-        return ttk.Checkbutton(parent, text=text + "   ", variable=variable,
-                               command=command, padding=(2, 2, 10, 2))
+        # Tk under-measures CJK labels, so reserve extra width in pixels rather
+        # than relying on character-count widths.
+        return ttk.Checkbutton(parent, text=text + "    ", variable=variable,
+                               command=command, padding=(4, 2, 28, 2))
 
     account_equity = tf_account_equity()
     form: dict[str, Any] = {
@@ -962,8 +962,9 @@ def run_form() -> int:
         cost = per_lot_cost(instrument)
         cost_part = f"+¥{cost:g} 成本" if cost else ""
         text = (f"1R ¥{budget:g}{suffix} ÷（{stop_ticks} 跳 × ¥{value_per_tick:g}{cost_part}）"
-                f"= ¥{sizing['per_lot_risk']:g}/手 → {sizing['raw_lots']:.2f} 手"
-                f" → {sizing['lots']} 手（风险 ¥{sizing['risk_rmb']:g}，余 ¥{sizing['remainder']:g}）")
+                f"= ¥{sizing['per_lot_risk']:g}/手\n"
+                f"→ {sizing['raw_lots']:.2f} 手 → {sizing['lots']} 手"
+                f"（风险 ¥{sizing['risk_rmb']:g}，余 ¥{sizing['remainder']:g}）")
         if sizing["lots"] < 1:
             text += "｜1R 不足 1 手"
             apply_text.set("1R 不足 1 手")
@@ -1618,8 +1619,8 @@ def run_form() -> int:
     form["risk_budget"].trace_add("write", lambda *_args: update_sizing())
     ttk.Button(budget_row, textvariable=apply_text, command=apply_sizing).pack(side="left", padx=(12, 0))
 
-    ttk.Label(sec_size, textvariable=sizing_text, foreground=THEME["ok"]).grid(
-        row=2, column=0, sticky="w", pady=(6, 4))
+    ttk.Label(sec_size, textvariable=sizing_text, foreground=THEME["ok"],
+              justify="left").grid(row=2, column=0, sticky="w", pady=(6, 4))
     size_row = ttk.Frame(sec_size)
     size_row.grid(row=3, column=0, sticky="w")
     ttk.Label(size_row, text="手数").pack(side="left")
