@@ -13,6 +13,9 @@ from __future__ import annotations
 import csv
 import hashlib
 import math
+import os
+import subprocess
+import sys
 import json
 import re
 import tempfile
@@ -23,9 +26,19 @@ from typing import Any
 
 import wh6_screen as wh6
 
+try:
+    import smc_chart
+except ModuleNotFoundError:  # direct file import from the test runner
+    import importlib.util as _importlib_util
+    _smc_spec = _importlib_util.spec_from_file_location("smc_chart", Path(__file__).with_name("smc_chart.py"))
+    smc_chart = _importlib_util.module_from_spec(_smc_spec)
+    assert _smc_spec.loader is not None
+    _smc_spec.loader.exec_module(smc_chart)
+
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "data" / "trade_form_state.json"
 PLAN_DIR = ROOT / "data" / "plans"
+SMC_CACHE_DIR = ROOT / "data" / "smc_charts"
 SNAPSHOTS = ROOT / "data" / "trade_assistant" / "pre_trade_snapshots.jsonl"
 CONFIG_PATH = ROOT / "data" / "trade_assistant_config.json"
 RISK_FIELDS = (
@@ -36,7 +49,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "3.6"
+FORM_VERSION = "4.0"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -1426,6 +1439,255 @@ def run_form() -> int:
             row=base + 2, column=2, pady=(4, 12))
         load_values()
 
+    smc_cfg: dict[str, Any] = {
+        "script": state.get("smc_script") or smc_chart.default_script_path(),
+        "python": state.get("smc_python") or sys.executable,
+        "candles": int(state.get("smc_candles") or 200),
+        "detect": int(state.get("smc_detect_length") or 500),
+        "indicators": list(state.get("smc_indicators") or smc_chart.DEFAULT_INDICATORS),
+    }
+
+    def smc_cache_dir(symbol: str) -> Path:
+        return SMC_CACHE_DIR / symbol
+
+    def persist_smc_state() -> None:
+        merged = load_state()
+        merged.update({
+            "smc_script": smc_cfg["script"],
+            "smc_python": smc_cfg["python"],
+            "smc_candles": smc_cfg["candles"],
+            "smc_detect_length": smc_cfg["detect"],
+            "smc_indicators": smc_cfg["indicators"],
+            "market_cache": market_cache,
+        })
+        save_state(merged)
+
+    def run_runner(symbol: str, period: str, indicators: list[str],
+                   outdir: Path) -> tuple[Path | None, str]:
+        """Call the renderer in a separate interpreter; returns (png, error)."""
+        script = smc_cfg["script"]
+        if not script or not Path(script).exists():
+            return None, f"找不到渲染脚本：{script or '(未设置)'}\n请在「设置」里填写 smc_comprehensive_chart.py 的路径"
+        cmd = smc_chart.build_runner_command(
+            smc_cfg["python"], Path(__file__).with_name("smc_chart_runner.py"),
+            smc_chart.script_root(script), symbol, period, indicators,
+            smc_cfg["candles"], smc_cfg["detect"], outdir,
+        )
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=smc_chart.RUNNER_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            return None, "生成超时（120 秒），请检查网络或减小 K 线数量"
+        except OSError as exc:
+            return None, f"无法启动解释器：{exc}"
+        try:
+            payload = smc_chart.parse_runner_output(proc.stdout)
+        except ValueError:
+            tail = (proc.stderr or proc.stdout or "无输出").strip().splitlines()[-6:]
+            return None, "生成器没有返回结果：\n" + "\n".join(tail)
+        if not payload.get("ok"):
+            return None, str(payload.get("error") or "生成失败")
+        return Path(str(payload.get("png"))), ""
+
+    def open_smc_window() -> None:
+        """M5/M15/H1/D1 SMC charts for the current contract."""
+        try:
+            symbol = smc_chart.symbol_for(recognized)
+        except ValueError as exc:
+            messagebox.showinfo("SMC 图", str(exc), parent=root)
+            return
+
+        win = tk.Toplevel(root)
+        win.title(f"SMC 标注图 · {symbol}")
+        win.geometry("1220x820")
+        win.transient(root)
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(3, weight=1)
+
+        period_var = tk.StringVar(value=smc_chart.PERIODS[0][1])
+        same_row = tk.BooleanVar(value=False)
+        status = tk.StringVar(value="选择周期开始生成")
+        indicator_vars = {
+            name: tk.BooleanVar(value=name in smc_cfg["indicators"])
+            for name in smc_chart.INDICATORS
+        }
+        photos: dict[str, Any] = {}
+
+        toolbar = ttk.Frame(win, padding=(10, 8, 10, 2))
+        toolbar.grid(row=0, column=0, sticky="ew")
+        ttk.Label(toolbar, text=f"品种 {symbol}", font=THEME["font_title"]).pack(side="left", padx=(0, 14))
+        ttk.Label(toolbar, text="周期").pack(side="left")
+        for label, code in smc_chart.PERIODS:
+            ttk.Radiobutton(toolbar, text=label, value=code, variable=period_var,
+                            command=lambda: refresh_view(False)).pack(side="left", padx=4)
+        check_option(toolbar, "多周期同列", same_row,
+                     command=lambda: refresh_view(False)).pack(side="left", padx=(14, 0))
+        ttk.Button(toolbar, text="重新生成", command=lambda: refresh_view(True)).pack(side="right", padx=4)
+        ttk.Button(toolbar, text="设置", command=lambda: open_smc_settings()).pack(side="right", padx=4)
+        ttk.Button(toolbar, text="打开缓存目录", command=lambda: open_smc_folder()).pack(side="right", padx=4)
+
+        indicator_row = ttk.Frame(win, padding=(10, 2, 10, 4))
+        indicator_row.grid(row=1, column=0, sticky="ew")
+        ttk.Label(indicator_row, text="指标").pack(side="left")
+        for name in smc_chart.INDICATORS:
+            check_option(indicator_row, smc_chart.INDICATOR_LABELS[name], indicator_vars[name],
+                         command=lambda: refresh_view(False)).pack(side="left", padx=(10, 0))
+
+        ttk.Label(win, textvariable=status, foreground=THEME["muted"]).grid(
+            row=2, column=0, sticky="w", padx=12, pady=(0, 4))
+
+        content = ttk.Frame(win, padding=(10, 0, 10, 10))
+        content.grid(row=3, column=0, sticky="nsew")
+
+        def chosen_indicators() -> list[str]:
+            return [name for name in smc_chart.INDICATORS if indicator_vars[name].get()]
+
+        def photo_for(path: Path, width: int, height: int) -> Any:
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+            except ImportError:
+                return None
+            image = Image.open(path)
+            image.thumbnail((max(80, width), max(80, height)))
+            return ImageTk.PhotoImage(image)
+
+        def show_fallback(path: Path) -> None:
+            try:
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            except (AttributeError, OSError):
+                messagebox.showinfo("SMC 图", f"图片已生成：\n{path}", parent=win)
+
+        def render_results(results: dict[str, tuple[Path | None, str]],
+                           indicators: list[str]) -> None:
+            for child in content.winfo_children():
+                child.destroy()
+            photos.clear()
+            periods = list(results)
+            columns = 2 if len(periods) > 1 else 1
+            width = 1150 if columns == 1 else 560
+            height = 700 if columns == 1 else 330
+            for index, (code, (path, error)) in enumerate(results.items()):
+                caption_text = next((label for label, value in smc_chart.PERIODS if value == code), code)
+                cell = ttk.LabelFrame(content, text=caption_text, padding=4)
+                cell.grid(row=index // columns, column=index % columns, sticky="nsew", padx=4, pady=4)
+                content.grid_columnconfigure(index % columns, weight=1)
+                content.grid_rowconfigure(index // columns, weight=1)
+                if error or path is None:
+                    ttk.Label(cell, text=error or "生成失败", foreground=THEME["danger"],
+                              wraplength=width - 40, justify="left").pack(fill="both", expand=True)
+                    continue
+                photo = photo_for(path, width, height)
+                status_info = smc_chart.cache_status(path)
+                caption = ttk.Label(cell, text=status_info["label"], foreground=THEME["muted"])
+                caption.pack(anchor="w")
+                if photo is None:
+                    ttk.Label(cell, text=f"Pillow 不可用，已生成：\n{path}").pack(anchor="w")
+                    show_fallback(path)
+                    continue
+                label = ttk.Label(cell, image=photo)
+                label.pack(fill="both", expand=True)
+                photos[code] = photo
+
+        def refresh_view(force: bool) -> None:
+            indicators = chosen_indicators()
+            try:
+                smc_chart.normalize_indicators(indicators)
+            except ValueError as exc:
+                status.set(str(exc))
+                return
+            periods = ([code for _label, code in smc_chart.PERIODS]
+                       if same_row.get() else [period_var.get()])
+            status.set("生成中…（首次会稍慢）")
+            outdir = smc_cache_dir(symbol)
+            outdir.mkdir(parents=True, exist_ok=True)
+
+            def worker() -> None:
+                results: dict[str, tuple[Path | None, str]] = {}
+                for code in periods:
+                    label = next((name for name, value in smc_chart.PERIODS if value == code), code)
+                    path = outdir / smc_chart.chart_filename(symbol, code, indicators)
+                    info = smc_chart.cache_status(path)
+                    if force or not info["exists"] or info["stale"]:
+                        root.after(0, lambda name=label: status.set(f"正在生成 {name}…"))
+                        path, error = run_runner(symbol, code, indicators, outdir)
+                    else:
+                        error = ""
+                    results[code] = (path, error)
+                root.after(0, lambda: (render_results(results, indicators),
+                                       status.set("已完成" if all(not r[1] for r in results.values())
+                                                  else "部分周期生成失败")))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def open_smc_folder() -> None:
+            outdir = smc_cache_dir(symbol)
+            outdir.mkdir(parents=True, exist_ok=True)
+            try:
+                os.startfile(str(outdir))  # type: ignore[attr-defined]
+            except (AttributeError, OSError) as exc:
+                messagebox.showinfo("缓存目录", f"{outdir}\n{exc}", parent=win)
+
+        def open_smc_settings() -> None:
+            dialog = tk.Toplevel(win)
+            dialog.title("SMC 设置")
+            dialog.transient(win)
+            script_var = tk.StringVar(value=smc_cfg["script"])
+            python_var = tk.StringVar(value=smc_cfg["python"])
+            candles_var = tk.StringVar(value=str(smc_cfg["candles"]))
+            detect_var = tk.StringVar(value=str(smc_cfg["detect"]))
+            rows = (("渲染脚本", script_var), ("Python 解释器", python_var),
+                    ("K 线数量", candles_var), ("检测长度", detect_var))
+            for row, (label, var) in enumerate(rows):
+                ttk.Label(dialog, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=4)
+                ttk.Entry(dialog, textvariable=var, width=70).grid(row=row, column=1, padx=8, pady=4)
+
+            def browse() -> None:
+                target = filedialog.askopenfilename(parent=dialog, title="选择 smc_comprehensive_chart.py",
+                                                    filetypes=[("Python", "*.py")])
+                if target:
+                    script_var.set(target)
+
+            def save() -> None:
+                try:
+                    candles = int(candles_var.get())
+                    detect = int(detect_var.get())
+                except ValueError:
+                    messagebox.showerror("SMC 设置", "K 线数量与检测长度必须是整数", parent=dialog)
+                    return
+                smc_cfg.update({"script": script_var.get().strip(),
+                                "python": python_var.get().strip(),
+                                "candles": candles, "detect": detect})
+                persist_smc_state()
+                status.set("设置已保存")
+                dialog.destroy()
+                refresh_view(True)
+
+            ttk.Button(dialog, text="浏览…", command=browse).grid(row=0, column=2, padx=8)
+            ttk.Button(dialog, text="保存", command=save).grid(row=5, column=0, pady=10)
+            ttk.Button(dialog, text="自检", command=lambda: self_check(dialog)).grid(row=5, column=1, sticky="w")
+            ttk.Button(dialog, text="取消", command=dialog.destroy).grid(row=5, column=2, pady=10)
+
+        def self_check(parent: tk.Toplevel) -> None:
+            python = smc_cfg["python"]
+            script = smc_cfg["script"]
+            lines = []
+            lines.append(("渲染脚本", "✓" if script and Path(script).exists() else "✗",
+                          script or "未设置"))
+            exists = Path(python).exists() if python else False
+            lines.append(("解释器", "✓" if exists else "✗", python or "未设置"))
+            try:
+                proc = subprocess.run([python, "-c", "import akshare, matplotlib, pandas; print('ok')"],
+                                      capture_output=True, text=True, timeout=60)
+                ok = proc.returncode == 0 and "ok" in proc.stdout
+                detail = "依赖齐全" if ok else (proc.stderr.strip().splitlines() or ["导入失败"])[-1]
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                ok, detail = False, str(exc)
+            lines.append(("依赖 akshare/matplotlib/pandas", "✓" if ok else "✗", detail))
+            text = "\n".join(f"{mark} {name}：{detail}" for name, mark, detail in lines)
+            messagebox.showinfo("SMC 自检", text, parent=parent)
+
+        refresh_view(False)
+
     def open_history() -> None:
         """Browse saved plans, grouped by variety, with delete and CSV export."""
         win = tk.Toplevel(root)
@@ -1657,7 +1919,7 @@ def run_form() -> int:
     header_buttons.grid(row=0, column=4, sticky="e", padx=(0, 12))
     for index, (label, command) in enumerate((
         ("刷新行情 F5", refresh), ("手工填价", manual_market),
-        ("品种配置", edit_config), ("历史计划", open_history),
+        ("SMC 图", open_smc_window), ("品种配置", edit_config), ("历史计划", open_history),
     )):
         ttk.Button(header_buttons, text=label, command=command).grid(row=0, column=index, padx=(6, 0))
 

@@ -8,6 +8,8 @@
 !/workspace-trade-summary-analysis/wh6_screen.py
 !/workspace-trade-summary-analysis/analyze_trades.py
 !/workspace-trade-summary-analysis/trade_form.py
+!/workspace-trade-summary-analysis/smc_chart.py
+!/workspace-trade-summary-analysis/smc_chart_runner.py
 !/workspace-trade-summary-analysis/TRADE_ASSISTANT_README.md
 !/workspace-trade-summary-analysis/WH6_TRADE_ASSISTANT_PLAYBOOK.md
 !/workspace-trade-summary-analysis/AB_MODEL_ARCHIVE.md
@@ -16,6 +18,7 @@
 !/workspace-trade-summary-analysis/tests/test_trade_assistant.py
 !/workspace-trade-summary-analysis/tests/test_wh6_screen.py
 !/workspace-trade-summary-analysis/tests/test_trade_form.py
+!/workspace-trade-summary-analysis/tests/test_smc_chart.py
 !/workspace-trade-summary-analysis/data/
 /workspace-trade-summary-analysis/data/*
 !/workspace-trade-summary-analysis/data/trade_assistant_config.json
