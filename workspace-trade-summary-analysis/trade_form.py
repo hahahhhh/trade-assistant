@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "3.2"
+FORM_VERSION = "3.3"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -668,6 +668,12 @@ def run_form() -> int:
         return ttk.Radiobutton(parent, text=text + "   ", value=value, variable=variable,
                                command=command, width=option_width(text), padding=(2, 2, 8, 2))
 
+    def check_option(parent: Any, text: str, variable: Any, command: Any = None) -> Any:
+        # Same CJK measurement problem as radiobuttons: pad the request so the
+        # rendered label cannot be clipped.
+        return ttk.Checkbutton(parent, text=text + "   ", variable=variable,
+                               command=command, padding=(2, 2, 10, 2))
+
     account_equity = tf_account_equity()
     form: dict[str, Any] = {
         "direction": tk.StringVar(value="long"),
@@ -1274,9 +1280,8 @@ def run_form() -> int:
 
         base = 2 + len(RISK_FIELDS)
         ttk.Label(win, textvariable=per_tick).grid(row=base, column=1, sticky="w", padx=8, pady=4)
-        ttk.Checkbutton(win, text="启用该品种（启用后才会参与风险检查）",
-                        variable=enabled).grid(row=base + 1, column=0, columnspan=3,
-                                               sticky="w", padx=8, pady=6)
+        check_option(win, "启用该品种（启用后才会参与风险检查）", enabled).grid(
+            row=base + 1, column=0, columnspan=3, sticky="w", padx=8, pady=6)
 
         def save() -> None:
             nonlocal config
@@ -1553,7 +1558,7 @@ def run_form() -> int:
         ttk.Radiobutton(sec_dir, text=label, value=value, variable=form["direction"],
                         command=fill_prices, style="Segment.Toolbutton", width=6).grid(
             row=0, column=index, sticky="w", padx=(0, 10))
-    ttk.Checkbutton(sec_dir, text="加仓", variable=form["is_add_on"]).grid(
+    check_option(sec_dir, "加仓", form["is_add_on"]).grid(
         row=0, column=2, sticky="w", padx=(18, 0))
 
     # ② 入场
@@ -1603,8 +1608,8 @@ def run_form() -> int:
 
     budget_row = ttk.Frame(sec_size)
     budget_row.grid(row=1, column=0, sticky="w", pady=(6, 0))
-    ttk.Checkbutton(budget_row, text="1R = 单笔上限", variable=form["budget_from_limit"],
-                    command=lambda: (sync_budget(), update_sizing())).pack(side="left")
+    check_option(budget_row, "1R = 单笔上限", form["budget_from_limit"],
+                 command=lambda: (sync_budget(), update_sizing())).pack(side="left")
     ttk.Label(budget_row, text="1R 金额").pack(side="left", padx=(14, 4))
     budget_widget = ttk.Spinbox(budget_row, textvariable=form["risk_budget"], width=8,
                                 from_=0, to=1000000, increment=50, command=update_sizing)
@@ -1628,8 +1633,8 @@ def run_form() -> int:
     sec_take.grid(row=4, column=0, sticky="ew", pady=(0, 6))
     take_row = ttk.Frame(sec_take)
     take_row.grid(row=0, column=0, sticky="w")
-    ttk.Checkbutton(take_row, text="止盈 = 止损 ×", variable=form["link_take"],
-                    command=on_link_toggle).pack(side="left")
+    check_option(take_row, "止盈 = 止损 ×", form["link_take"],
+                 command=on_link_toggle).pack(side="left")
     rr_box = ttk.Combobox(take_row, textvariable=form["rr_ratio"], values=("1", "1.5", "2", "3", "4"),
                           width=5)
     rr_box.pack(side="left", padx=4)
