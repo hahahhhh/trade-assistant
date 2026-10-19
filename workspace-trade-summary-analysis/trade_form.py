@@ -51,7 +51,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "4.2"
+FORM_VERSION = "4.3"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -1594,7 +1594,12 @@ def run_form() -> int:
                             command=lambda: refresh_view(False)).pack(side="left", padx=4)
         check_option(toolbar, "多周期同列", same_row,
                      command=lambda: refresh_view(False)).pack(side="left", padx=(14, 0))
+        zoom_label = tk.StringVar(value="缩放 100%")
         ttk.Button(toolbar, text="重新生成", command=lambda: refresh_view(True)).pack(side="right", padx=4)
+        ttk.Button(toolbar, text="放大 ＋", command=lambda: zoom_step(1.25)).pack(side="right", padx=2)
+        ttk.Button(toolbar, text="缩小 －", command=lambda: zoom_step(0.8)).pack(side="right", padx=2)
+        ttk.Button(toolbar, text="适应窗口", command=lambda: zoom_step(0.0)).pack(side="right", padx=2)
+        ttk.Label(toolbar, textvariable=zoom_label, foreground=THEME["muted"]).pack(side="right", padx=8)
         ttk.Button(toolbar, text="设置", command=lambda: open_smc_settings()).pack(side="right", padx=4)
         ttk.Button(toolbar, text="打开缓存目录", command=lambda: open_smc_folder()).pack(side="right", padx=4)
 
@@ -1615,22 +1620,80 @@ def run_form() -> int:
         def chosen_indicators() -> list[str]:
             return [name for name in smc_chart.INDICATORS if indicator_vars[name].get()]
 
-        def photo_for(path: Path, width: int, height: int) -> Any:
+        zoom = {"factor": 1.0, "redraw": None, "period": None}
+
+        def zoom_step(step: float) -> None:
+            zoom["factor"] = 1.0 if step == 0 else max(0.2, min(8.0, zoom["factor"] * step))
+            redraw = zoom["redraw"]
+            if redraw is not None:
+                redraw()
+
+        def load_image(path: Path) -> Any:
+            from PIL import Image  # type: ignore
+            payload = smc_chart.read_bytes_with_retry(path)
+            image = Image.open(io.BytesIO(payload))
+            image.load()
+            return image
+
+        def photo_for(image: Any, width: int, height: int) -> Any:
             try:
-                from PIL import Image, ImageTk  # type: ignore
+                from PIL import ImageTk  # type: ignore
             except ImportError:
                 return None
-            payload = smc_chart.read_bytes_with_retry(path)
-            with Image.open(io.BytesIO(payload)) as image:
-                image.load()
-                image.thumbnail((max(80, width), max(80, height)))
-                return ImageTk.PhotoImage(image.copy())
+            copy = image.copy()
+            copy.thumbnail((max(80, width), max(80, height)))
+            return ImageTk.PhotoImage(copy)
 
         def show_fallback(path: Path) -> None:
             try:
                 os.startfile(str(path))  # type: ignore[attr-defined]
             except (AttributeError, OSError):
                 messagebox.showinfo("SMC 图", f"图片已生成：\n{path}", parent=win)
+
+        def build_viewer(cell: Any, code: str, path: Path) -> None:
+            """Canvas viewer with wheel zoom, ctrl+wheel zoom, drag to pan."""
+            from PIL import ImageTk  # type: ignore
+            image = load_image(path)
+            canvas = tk.Canvas(cell, background="#ffffff", highlightthickness=0)
+            hbar = ttk.Scrollbar(cell, orient="horizontal", command=canvas.xview)
+            vbar = ttk.Scrollbar(cell, orient="vertical", command=canvas.yview)
+            canvas.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set)
+            canvas.grid(row=0, column=0, sticky="nsew")
+            vbar.grid(row=0, column=1, sticky="ns")
+            hbar.grid(row=1, column=0, sticky="ew")
+            cell.grid_columnconfigure(0, weight=1)
+            cell.grid_rowconfigure(0, weight=1)
+
+            def redraw() -> None:
+                width = max(200, canvas.winfo_width() - 4)
+                height = max(200, canvas.winfo_height() - 4)
+                factor = max(0.2, min(8.0, zoom["factor"]))
+                zoom["factor"] = factor
+                size = smc_chart.scaled_size(image.width, image.height, width, height, factor)
+                photo = ImageTk.PhotoImage(image.resize(size))
+                photos[code] = photo
+                canvas.delete("all")
+                canvas.create_image(0, 0, anchor="nw", image=photo)
+                canvas.configure(scrollregion=(0, 0, size[0], size[1]))
+                zoom_label.set(f"缩放 {factor * 100:.0f}%")
+
+            def zoom_by(step: float) -> None:
+                zoom["factor"] = max(0.2, min(8.0, zoom["factor"] * step))
+                redraw()
+
+            def on_wheel(event: Any) -> None:
+                if event.state & 0x0004:  # Ctrl held → zoom
+                    zoom_by(1.15 if event.delta > 0 else 1 / 1.15)
+                else:
+                    canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+            canvas.bind("<MouseWheel>", on_wheel)
+            canvas.bind("<ButtonPress-1>", lambda event: canvas.scan_mark(event.x, event.y))
+            canvas.bind("<B1-Motion>", lambda event: canvas.scan_dragto(event.x, event.y, gain=1))
+            canvas.bind("<Configure>", lambda _event: redraw())
+            zoom["redraw"] = redraw
+            zoom["period"] = code
+            cell.after(30, redraw)
 
         def render_results(results: dict[str, tuple[Path | None, str]],
                            indicators: list[str]) -> None:
@@ -1639,6 +1702,7 @@ def run_form() -> int:
             for child in content.winfo_children():
                 child.destroy()
             photos.clear()
+            zoom["redraw"] = None
             periods = list(results)
             columns = 2 if len(periods) > 1 else 1
             width = 1150 if columns == 1 else 560
@@ -1653,22 +1717,32 @@ def run_form() -> int:
                     ttk.Label(cell, text=error or "生成失败", foreground=THEME["danger"],
                               wraplength=width - 40, justify="left").pack(fill="both", expand=True)
                     continue
+                status_info = smc_chart.cache_status(path)
+                caption = status_info["label"]
                 try:
-                    photo = photo_for(path, width, height)
+                    if columns == 1:
+                        # grid manager: canvas + scrollbars + caption row
+                        ttk.Label(cell, text=caption, foreground=THEME["muted"]).grid(
+                            row=2, column=0, sticky="w", padx=2)
+                        cell.grid_rowconfigure(0, weight=1)
+                        build_viewer(cell, code, path)
+                    else:
+                        # pack manager inside the cell: one geometry manager only
+                        ttk.Label(cell, text=caption, foreground=THEME["muted"]).pack(anchor="w")
+                        image = load_image(path)
+                        photo = photo_for(image, width, height)
+                        if photo is None:
+                            ttk.Label(cell, text=f"Pillow 不可用，已生成：\n{path}").pack(anchor="w")
+                            show_fallback(path)
+                            continue
+                        label = ttk.Label(cell, image=photo)
+                        label.pack(fill="both", expand=True)
+                        photos[code] = photo
+                        label.bind("<Double-Button-1>", lambda _event, value=code: (
+                            period_var.set(value), same_row.set(False), refresh_view(False)))
                 except Exception as exc:  # locked file, corrupt png, decode error
                     ttk.Label(cell, text=f"读取图片失败：{exc}\n{path}", foreground=THEME["danger"],
                               wraplength=width - 40, justify="left").pack(fill="both", expand=True)
-                    continue
-                status_info = smc_chart.cache_status(path)
-                caption = ttk.Label(cell, text=status_info["label"], foreground=THEME["muted"])
-                caption.pack(anchor="w")
-                if photo is None:
-                    ttk.Label(cell, text=f"Pillow 不可用，已生成：\n{path}").pack(anchor="w")
-                    show_fallback(path)
-                    continue
-                label = ttk.Label(cell, image=photo)
-                label.pack(fill="both", expand=True)
-                photos[code] = photo
 
         def refresh_view(force: bool) -> None:
             indicators = chosen_indicators()

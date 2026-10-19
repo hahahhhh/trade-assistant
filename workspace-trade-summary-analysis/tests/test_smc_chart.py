@@ -123,6 +123,16 @@ class CommandTests(unittest.TestCase):
         self.assertIn("'/opt/my python/bin/python'", cmd)
         self.assertIn('akshare', cmd)
 
+    def test_scaled_size_fits_then_zooms(self):
+        w, h = sc.scaled_size(2084, 1632, 1000, 700)
+        self.assertEqual((w, h), (893, 700))
+        w2, h2 = sc.scaled_size(2084, 1632, 1000, 700, 2.0)
+        self.assertEqual((w2, h2), (1787, 1400))
+
+    def test_scaled_size_rejects_bad_image(self):
+        with self.assertRaises(ValueError):
+            sc.scaled_size(0, 10, 100, 100)
+
     def test_read_bytes_with_retry_success(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:

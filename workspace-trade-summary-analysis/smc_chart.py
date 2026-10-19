@@ -74,6 +74,17 @@ def read_bytes_with_retry(path: Path, attempts: int = 6, delay: float = 0.2) -> 
     raise last if last is not None else OSError(f"无法读取 {path}")
 
 
+def scaled_size(image_w: int, image_h: int, view_w: int, view_h: int,
+                factor: float = 1.0) -> tuple[int, int]:
+    """Fit the image into the viewport, then apply the zoom factor."""
+    if image_w <= 0 or image_h <= 0:
+        raise ValueError("图片尺寸无效")
+    view_w = max(50, int(view_w))
+    view_h = max(50, int(view_h))
+    fit = min(view_w / image_w, view_h / image_h)
+    return (max(1, int(image_w * fit * factor)), max(1, int(image_h * fit * factor)))
+
+
 def cache_status(path: Path, ttl_seconds: int = CACHE_TTL_SECONDS,
                  now: datetime | None = None) -> dict[str, Any]:
     """Describe a cached chart: presence, age, and whether it is stale."""
