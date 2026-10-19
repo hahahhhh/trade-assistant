@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "3.0"
+FORM_VERSION = "3.1"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -713,6 +713,7 @@ def run_form() -> int:
     ratio_note = tk.StringVar(value="")
     checked_at = tk.StringVar(value="尚未检查")
     apply_text = tk.StringVar(value="套用建议手数")
+    equity_hint = tk.StringVar(value="选择品种后显示上限来源")
     version_info = tk.StringVar(value=f"v{FORM_VERSION} · 尚未检查")
 
     def set_badge(status: str | None, stale: bool) -> None:
@@ -856,6 +857,27 @@ def run_form() -> int:
         update_sizing()
         update_metrics()
 
+    def update_equity_hint() -> None:
+        """Explain how the current cap is derived, given the instrument mode."""
+        variety = recognized.get("variety")
+        instrument = config["instruments"].get(variety) if variety else None
+        if not instrument or not instrument.get("configured"):
+            equity_hint.set("选择品种后显示上限来源")
+            return
+        if instrument.get("risk_budget_mode") == "percent_of_equity":
+            percent = instrument.get("risk_percent")
+            equity = current_equity()
+            if not percent:
+                equity_hint.set("百分比模式：未设置比例，请在「品种配置」里填写")
+            elif equity is None:
+                equity_hint.set(f"百分比模式：请填总资金（当前 {float(percent):g}%）")
+            else:
+                limit = math.floor(equity * float(percent) / 100)
+                equity_hint.set(f"上限 = ¥{equity:g} × {float(percent):g}% = ¥{limit:g}")
+        else:
+            limit = instrument.get("single_trade_limit_rmb")
+            equity_hint.set(f"固定金额模式：上限 ¥{float(limit):g}（总资金不参与计算）")
+
     def on_equity_change(_event: Any = None) -> None:
         """Persist equity, then recompute every limit that depends on it."""
         equity = current_equity()
@@ -869,6 +891,7 @@ def run_form() -> int:
         sync_budget()
         update_sizing()
         update_metrics()
+        update_equity_hint()
 
     def current_equity() -> float | None:
         raw = form["equity"].get().strip()
@@ -1012,6 +1035,7 @@ def run_form() -> int:
             banner.configure(background=THEME["band_low"] if (low_conf or problems) else "#ffffff")
         sync_increments()
         sync_budget()
+        update_equity_hint()
         fill_prices()
 
     def refresh() -> None:
@@ -1271,6 +1295,7 @@ def run_form() -> int:
             form["status"].set(summary)
             sync_increments()
             sync_budget()
+            update_equity_hint()
             fill_prices()
             win.destroy()
 
@@ -1563,8 +1588,17 @@ def run_form() -> int:
     # ④ 手数
     sec_size = ttk.LabelFrame(ticket, text="④ 手数（按 1R 推导）", padding=8)
     sec_size.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+    equity_row = ttk.Frame(sec_size)
+    equity_row.grid(row=0, column=0, sticky="w")
+    ttk.Label(equity_row, text="总资金").pack(side="left")
+    equity_spin = ttk.Spinbox(equity_row, textvariable=form["equity"], width=12,
+                              from_=0, to=100000000, increment=1000, command=on_equity_change)
+    equity_spin.pack(side="left", padx=6)
+    ttk.Label(equity_row, textvariable=equity_hint, foreground=THEME["muted"]).pack(side="left", padx=(4, 0))
+    form["equity"].trace_add("write", lambda *_args: on_equity_change())
+
     budget_row = ttk.Frame(sec_size)
-    budget_row.grid(row=0, column=0, sticky="w")
+    budget_row.grid(row=1, column=0, sticky="w", pady=(6, 0))
     ttk.Checkbutton(budget_row, text="1R = 单笔上限", variable=form["budget_from_limit"],
                     command=lambda: (sync_budget(), update_sizing())).pack(side="left")
     ttk.Label(budget_row, text="1R 金额").pack(side="left", padx=(14, 4))
@@ -1576,9 +1610,9 @@ def run_form() -> int:
     ttk.Button(budget_row, textvariable=apply_text, command=apply_sizing).pack(side="left", padx=(12, 0))
 
     ttk.Label(sec_size, textvariable=sizing_text, foreground=THEME["ok"]).grid(
-        row=1, column=0, sticky="w", pady=(6, 4))
+        row=2, column=0, sticky="w", pady=(6, 4))
     size_row = ttk.Frame(sec_size)
-    size_row.grid(row=2, column=0, sticky="w")
+    size_row.grid(row=3, column=0, sticky="w")
     ttk.Label(size_row, text="手数").pack(side="left")
     size_spin = ttk.Spinbox(size_row, from_=1, to=50, width=6, textvariable=form["size"],
                             command=fill_prices)
@@ -1637,24 +1671,15 @@ def run_form() -> int:
     panel = ttk.Frame(body)
     panel.grid(row=0, column=1, sticky="nsew")
     panel.grid_columnconfigure(0, weight=1)
-    panel.grid_rowconfigure(4, weight=1)
+    panel.grid_rowconfigure(3, weight=1)
 
     badge = tk.Label(panel, textvariable=badge_text, font=THEME["font_badge"],
                      foreground=THEME["muted"], background="#f2f2f2", padx=10, pady=12, anchor="center")
     badge.grid(row=0, column=0, sticky="ew")
     widgets["badge"] = badge
 
-    equity_row = ttk.Frame(panel)
-    equity_row.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-    ttk.Label(equity_row, text="总资金（元）").pack(side="left")
-    equity_spin = ttk.Spinbox(equity_row, textvariable=form["equity"], width=12,
-                              from_=0, to=100000000, increment=1000, command=on_equity_change)
-    equity_spin.pack(side="left", padx=6)
-    ttk.Label(equity_row, text="百分比模式使用", foreground=THEME["muted"]).pack(side="left")
-    form["equity"].trace_add("write", lambda *_args: on_equity_change())
-
     metric_frame = ttk.LabelFrame(panel, text="风险", padding=8)
-    metric_frame.grid(row=2, column=0, sticky="ew", pady=8)
+    metric_frame.grid(row=1, column=0, sticky="ew", pady=8)
     metric_frame.grid_columnconfigure(1, weight=1)
     metric_rows = (("每手风险", "per_lot"), ("计划风险", "total"),
                    ("单笔上限", "limit"), ("剩余预算", "remain"),
@@ -1670,21 +1695,21 @@ def run_form() -> int:
         row=len(metric_rows), column=1, sticky="e", pady=(6, 0))
 
     bar_frame = ttk.Frame(panel)
-    bar_frame.grid(row=3, column=0, sticky="ew")
+    bar_frame.grid(row=2, column=0, sticky="ew")
     ttk.Progressbar(bar_frame, maximum=100, variable=ratio_var).pack(fill="x")
     note_label = ttk.Label(bar_frame, textvariable=ratio_note, foreground=THEME["muted"])
     note_label.pack(anchor="w", pady=(2, 0))
     widgets["ratio_note"] = note_label
 
     reasons_frame = ttk.LabelFrame(panel, text="检查发现", padding=6)
-    reasons_frame.grid(row=4, column=0, sticky="nsew", pady=8)
+    reasons_frame.grid(row=3, column=0, sticky="nsew", pady=8)
     reasons_text = tk.Text(reasons_frame, height=6, wrap="word", state="disabled", relief="flat")
     reasons_text.pack(fill="both", expand=True)
     widgets["reasons"] = reasons_text
     _fill_text("reasons", "尚未检查")
 
     action_frame = ttk.Frame(panel)
-    action_frame.grid(row=5, column=0, sticky="ew")
+    action_frame.grid(row=4, column=0, sticky="ew")
     ttk.Button(action_frame, text="检查计划  Ctrl+Enter", command=check).pack(fill="x", pady=(0, 6))
     save_button = ttk.Button(action_frame, text="保存计划  Ctrl+S", command=save, state="disabled")
     save_button.pack(fill="x")
@@ -1729,6 +1754,7 @@ def run_form() -> int:
 
     set_badge(None, True)
     update_metrics()
+    update_equity_hint()
     on_link_toggle()
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()

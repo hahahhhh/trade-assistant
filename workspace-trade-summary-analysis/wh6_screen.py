@@ -31,7 +31,7 @@ except ModuleNotFoundError:  # direct file import from the test runner
     effective_trade_limit = _module.effective_trade_limit
     daily_loss_limit = _module.daily_loss_limit
 
-TOOL_VERSION = "2026-10.19"
+TOOL_VERSION = "2026-10.20"
 PROCESS_NAME = "mytrader_spqh.exe"
 APP_NAME = "wh6"
 
