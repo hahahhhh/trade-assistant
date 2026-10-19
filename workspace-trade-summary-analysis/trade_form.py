@@ -51,7 +51,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "4.3"
+FORM_VERSION = "4.4"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -1097,6 +1097,25 @@ def run_form() -> int:
             box.configure(state="readonly" if linked else "disabled")
         fill_prices()
 
+    smc_ref: dict[str, Any] = {"window": None, "retarget": None}
+
+    def retarget_smc_window(variety: str) -> None:
+        """Keep an open SMC window on the newly selected contract."""
+        window = smc_ref.get("window")
+        callback = smc_ref.get("retarget")
+        if window is None or callback is None:
+            return
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            symbol = smc_chart.symbol_for(recognized)
+        except ValueError:
+            return
+        callback(symbol)
+
     def apply_market(data: dict[str, Any]) -> None:
         nonlocal recognized
         recognized = data
@@ -1155,6 +1174,8 @@ def run_form() -> int:
         sync_budget()
         update_equity_hint()
         fill_prices()
+        if variety:
+            retarget_smc_window(variety)
 
     def variety_choices() -> list[str]:
         codes = {code for code, inst in config["instruments"].items() if inst.get("configured")}
@@ -1170,10 +1191,20 @@ def run_form() -> int:
             return
         market, age = cached_market(market_cache, variety)
         if market is None:
-            form["status"].set(f"{variety} 还没有缓存行情：请在 WH6 切到该合约后按 F5 识别一次")
+            # Keep the selector honest: it must not claim a variety we have no data for.
+            current = recognized.get("variety") or ""
+            form["variety_pick"].set(current)
+            messagebox.showinfo(
+                "切换品种",
+                f"{variety} 还没有缓存行情。\n\n"
+                f"请先在 WH6 切到该合约，再按 F5（刷新行情）识别一次，"
+                f"之后就可以秒切了。",
+                parent=root)
+            form["status"].set(f"{variety} 无缓存，仍停留在 {current or '空'}；请按 F5 识别该合约")
             return
         apply_market(market)
         form["status"].set(f"已切换到 {variety}（{age_text(age)}，未重新 OCR）")
+        retarget_smc_window(variety)
 
     def refresh() -> None:
         form["status"].set("正在识别 WH6…")
@@ -1573,6 +1604,7 @@ def run_form() -> int:
         win.title(f"SMC 标注图 · {symbol}")
         win.geometry("1220x820")
         win.transient(root)
+        smc_ref["window"] = win
         win.grid_columnconfigure(0, weight=1)
         win.grid_rowconfigure(3, weight=1)
 
@@ -1926,6 +1958,23 @@ def run_form() -> int:
             text = "\n".join(f"{mark} {name}：{detail}" for name, mark, detail in lines)
             messagebox.showinfo("SMC 自检", text, parent=parent)
 
+        def retarget(new_symbol: str) -> None:
+            nonlocal symbol
+            if new_symbol == symbol:
+                return
+            symbol = new_symbol
+            win.title(f"SMC 标注图 · {symbol}")
+            status.set(f"品种已切到 {symbol}，正在更新…")
+            refresh_view(False)
+
+        smc_ref["retarget"] = retarget
+
+        def close_window() -> None:
+            smc_ref["window"] = None
+            smc_ref["retarget"] = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", close_window)
         refresh_view(False)
 
     def open_history() -> None:
