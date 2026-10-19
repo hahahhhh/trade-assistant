@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,19 @@ def normalize_indicators(indicators: list[str] | tuple[str, ...]) -> list[str]:
 def chart_filename(symbol: str, period: str, indicators: list[str] | tuple[str, ...]) -> str:
     names = normalize_indicators(indicators)
     return f"{symbol}_{period}m_{'+'.join(names)}.png"
+
+
+def read_bytes_with_retry(path: Path, attempts: int = 6, delay: float = 0.2) -> bytes:
+    """Windows can briefly lock a freshly copied file (scp/AV); retry briefly."""
+    last: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            last = exc
+            if attempt < attempts - 1:
+                time.sleep(delay)
+    raise last if last is not None else OSError(f"无法读取 {path}")
 
 
 def cache_status(path: Path, ttl_seconds: int = CACHE_TTL_SECONDS,

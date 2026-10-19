@@ -123,6 +123,17 @@ class CommandTests(unittest.TestCase):
         self.assertIn("'/opt/my python/bin/python'", cmd)
         self.assertIn('akshare', cmd)
 
+    def test_read_bytes_with_retry_success(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'x.png'
+            path.write_bytes(b'data')
+            self.assertEqual(sc.read_bytes_with_retry(path), b'data')
+
+    def test_read_bytes_with_retry_fails_after_attempts(self):
+        with self.assertRaises(OSError):
+            sc.read_bytes_with_retry(Path('/tmp/definitely-missing.png'), attempts=2, delay=0)
+
     def test_script_root(self):
         self.assertEqual(sc.script_root('/home/x/trade-signal/examples/a.py').name, 'trade-signal')
 

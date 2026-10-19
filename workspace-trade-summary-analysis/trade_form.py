@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import math
 import os
 import subprocess
 import sys
+import time
 import json
 import re
 import tempfile
@@ -49,7 +51,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "4.1"
+FORM_VERSION = "4.2"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -1537,16 +1539,26 @@ def run_form() -> int:
         remote_png = str(payload.get("png"))
         target = outdir / smc_chart.chart_filename(symbol, period, indicators)
         outdir.mkdir(parents=True, exist_ok=True)
+        staging = target.with_name(target.stem + ".part" + target.suffix)
         try:
-            copy = subprocess.run(smc_chart.build_scp_command(host, remote_png, target),
+            copy = subprocess.run(smc_chart.build_scp_command(host, remote_png, staging),
                                   capture_output=True, text=True, timeout=90)
         except subprocess.TimeoutExpired:
             return None, "取回图片超时"
         except OSError as exc:
             return None, f"无法执行 scp：{exc}"
-        if copy.returncode != 0 or not target.exists():
+        if copy.returncode != 0 or not staging.exists():
             tail = (copy.stderr or "").strip().splitlines()[-4:]
             return None, "取回图片失败：\n" + "\n".join(tail or ["无输出"])
+        # Windows: replace can still fail while another reader holds the file.
+        for attempt in range(5):
+            try:
+                os.replace(staging, target)
+                break
+            except OSError:
+                if attempt == 4:
+                    return target, ""
+                time.sleep(0.2)
         return target, ""
 
     def open_smc_window() -> None:
@@ -1598,6 +1610,7 @@ def run_form() -> int:
 
         content = ttk.Frame(win, padding=(10, 0, 10, 10))
         content.grid(row=3, column=0, sticky="nsew")
+        render_seq = {"value": 0}
 
         def chosen_indicators() -> list[str]:
             return [name for name in smc_chart.INDICATORS if indicator_vars[name].get()]
@@ -1607,9 +1620,11 @@ def run_form() -> int:
                 from PIL import Image, ImageTk  # type: ignore
             except ImportError:
                 return None
-            image = Image.open(path)
-            image.thumbnail((max(80, width), max(80, height)))
-            return ImageTk.PhotoImage(image)
+            payload = smc_chart.read_bytes_with_retry(path)
+            with Image.open(io.BytesIO(payload)) as image:
+                image.load()
+                image.thumbnail((max(80, width), max(80, height)))
+                return ImageTk.PhotoImage(image.copy())
 
         def show_fallback(path: Path) -> None:
             try:
@@ -1619,6 +1634,8 @@ def run_form() -> int:
 
         def render_results(results: dict[str, tuple[Path | None, str]],
                            indicators: list[str]) -> None:
+            if not content.winfo_exists():
+                return
             for child in content.winfo_children():
                 child.destroy()
             photos.clear()
@@ -1636,7 +1653,12 @@ def run_form() -> int:
                     ttk.Label(cell, text=error or "生成失败", foreground=THEME["danger"],
                               wraplength=width - 40, justify="left").pack(fill="both", expand=True)
                     continue
-                photo = photo_for(path, width, height)
+                try:
+                    photo = photo_for(path, width, height)
+                except Exception as exc:  # locked file, corrupt png, decode error
+                    ttk.Label(cell, text=f"读取图片失败：{exc}\n{path}", foreground=THEME["danger"],
+                              wraplength=width - 40, justify="left").pack(fill="both", expand=True)
+                    continue
                 status_info = smc_chart.cache_status(path)
                 caption = ttk.Label(cell, text=status_info["label"], foreground=THEME["muted"])
                 caption.pack(anchor="w")
@@ -1660,6 +1682,8 @@ def run_form() -> int:
             status.set("生成中…（首次会稍慢）")
             outdir = smc_cache_dir(symbol)
             outdir.mkdir(parents=True, exist_ok=True)
+            render_seq["value"] += 1
+            token = render_seq["value"]
 
             def worker() -> None:
                 results: dict[str, tuple[Path | None, str]] = {}
@@ -1673,9 +1697,17 @@ def run_form() -> int:
                     else:
                         error = ""
                     results[code] = (path, error)
-                root.after(0, lambda: (render_results(results, indicators),
-                                       status.set("已完成" if all(not r[1] for r in results.values())
-                                                  else "部分周期生成失败")))
+                if token != render_seq["value"]:
+                    return  # a newer request superseded this one
+
+                def apply() -> None:
+                    if token != render_seq["value"]:
+                        return
+                    render_results(results, indicators)
+                    status.set("已完成" if all(not r[1] for r in results.values())
+                               else "部分周期生成失败")
+
+                root.after(0, apply)
 
             threading.Thread(target=worker, daemon=True).start()
 
