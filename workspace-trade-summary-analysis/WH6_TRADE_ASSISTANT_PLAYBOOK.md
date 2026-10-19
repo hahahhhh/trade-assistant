@@ -477,7 +477,36 @@ python workspace-trade-summary-analysis\trade_form.py
 - 缓存 10 分钟，过期标黄但不自动重生成（避免打断看图）；「重新生成」强制刷新；
 - 生成在后台线程进行，界面不会卡住。
 
-**Windows 首次配置**（点窗口内「设置」）：
+**两种生成方式**（窗口内「设置」切换）：
+
+| 方式 | 说明 | 前置条件 |
+|---|---|---|
+| 远程 SSH（推荐） | 表单发一条 ssh 命令到 Linux，用 `quant` 环境渲染，再把 PNG 取回本地缓存 | Windows 自带 OpenSSH 客户端；已配置到 Linux 的免密登录 |
+| 本地 | 在 Windows 上直接跑脚本 | 本机有 trade-signal 代码，且装了 akshare/matplotlib/pandas |
+
+远程模式的设置项：
+
+```text
+SSH 主机        myhost           ← ~/.ssh/config 里的别名，或 user@ip
+远程 Python     /home/coding/quant/bin/python
+远程仓库        /home/coding/trade-signal
+远程 runner     /home/coding/dsh-trade/workspace-trade-summary-analysis/smc_chart_runner.py
+远程缓存目录    /home/coding/trade-signal/output/smc_cache
+```
+
+主机建议写进 `C:\Users\<你>\.ssh\config`，把端口、用户名、私钥都放进去：
+
+```text
+Host myhost
+  HostName 43.128.227.9
+  Port 22026
+  User root
+  IdentityFile ~/.ssh/tradesignal_key
+```
+
+这样表单里只填 `myhost` 即可。命令以 `BatchMode=yes` 执行：**没有免密登录会立刻报错而不是卡住**（弹密码框会让界面线程挂起）。
+
+**本地方式配置**（点窗口内「设置」）：
 
 | 项 | 填什么 |
 |---|---|

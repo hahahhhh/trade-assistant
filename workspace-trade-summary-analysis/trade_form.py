@@ -49,7 +49,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "4.0"
+FORM_VERSION = "4.1"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -1440,8 +1440,15 @@ def run_form() -> int:
         load_values()
 
     smc_cfg: dict[str, Any] = {
+        "mode": state.get("smc_mode") or "local",
         "script": state.get("smc_script") or smc_chart.default_script_path(),
         "python": state.get("smc_python") or sys.executable,
+        "host": state.get("smc_host") or "",
+        "remote_python": state.get("smc_remote_python") or "/home/coding/quant/bin/python",
+        "remote_root": state.get("smc_remote_root") or "/home/coding/trade-signal",
+        "remote_runner": state.get("smc_remote_runner")
+        or "/home/coding/dsh-trade/workspace-trade-summary-analysis/smc_chart_runner.py",
+        "remote_outdir": state.get("smc_remote_outdir") or "/home/coding/trade-signal/output/smc_cache",
         "candles": int(state.get("smc_candles") or 200),
         "detect": int(state.get("smc_detect_length") or 500),
         "indicators": list(state.get("smc_indicators") or smc_chart.DEFAULT_INDICATORS),
@@ -1453,8 +1460,14 @@ def run_form() -> int:
     def persist_smc_state() -> None:
         merged = load_state()
         merged.update({
+            "smc_mode": smc_cfg["mode"],
             "smc_script": smc_cfg["script"],
             "smc_python": smc_cfg["python"],
+            "smc_host": smc_cfg["host"],
+            "smc_remote_python": smc_cfg["remote_python"],
+            "smc_remote_root": smc_cfg["remote_root"],
+            "smc_remote_runner": smc_cfg["remote_runner"],
+            "smc_remote_outdir": smc_cfg["remote_outdir"],
             "smc_candles": smc_cfg["candles"],
             "smc_detect_length": smc_cfg["detect"],
             "smc_indicators": smc_cfg["indicators"],
@@ -1464,7 +1477,9 @@ def run_form() -> int:
 
     def run_runner(symbol: str, period: str, indicators: list[str],
                    outdir: Path) -> tuple[Path | None, str]:
-        """Call the renderer in a separate interpreter; returns (png, error)."""
+        """Generate one chart locally or through ssh; returns (png, error)."""
+        if smc_cfg["mode"] == "ssh":
+            return run_runner_remote(symbol, period, indicators, outdir)
         script = smc_cfg["script"]
         if not script or not Path(script).exists():
             return None, f"找不到渲染脚本：{script or '(未设置)'}\n请在「设置」里填写 smc_comprehensive_chart.py 的路径"
@@ -1488,6 +1503,51 @@ def run_form() -> int:
         if not payload.get("ok"):
             return None, str(payload.get("error") or "生成失败")
         return Path(str(payload.get("png"))), ""
+
+    def run_runner_remote(symbol: str, period: str, indicators: list[str],
+                          outdir: Path) -> tuple[Path | None, str]:
+        """Generate on the Linux host, then copy the PNG back into the local cache."""
+        host = smc_cfg["host"].strip()
+        if not host:
+            return None, "还没有设置 SSH 主机（SMC 设置 → 远程模式）"
+        command = smc_chart.remote_runner_command(
+            smc_cfg["remote_python"], smc_cfg["remote_runner"], smc_cfg["remote_root"],
+            symbol, period, indicators, smc_cfg["candles"], smc_cfg["detect"],
+            smc_cfg["remote_outdir"],
+        )
+        try:
+            proc = subprocess.run(smc_chart.build_ssh_command(host, command),
+                                  capture_output=True, text=True,
+                                  timeout=smc_chart.RUNNER_TIMEOUT_SECONDS + 30)
+        except subprocess.TimeoutExpired:
+            return None, "远程生成超时，请检查网络与 SSH 连接"
+        except OSError as exc:
+            return None, f"无法执行 ssh：{exc}\nWindows 需启用 OpenSSH 客户端"
+        if proc.returncode != 0 and not proc.stdout.strip():
+            tail = (proc.stderr or "").strip().splitlines()[-4:]
+            return None, "SSH 执行失败：\n" + "\n".join(tail or ["无输出"])
+        try:
+            payload = smc_chart.parse_runner_output(proc.stdout)
+        except ValueError:
+            tail = (proc.stderr or proc.stdout or "无输出").strip().splitlines()[-6:]
+            return None, "远程没有返回结果：\n" + "\n".join(tail)
+        if not payload.get("ok"):
+            return None, str(payload.get("error") or "远程生成失败")
+
+        remote_png = str(payload.get("png"))
+        target = outdir / smc_chart.chart_filename(symbol, period, indicators)
+        outdir.mkdir(parents=True, exist_ok=True)
+        try:
+            copy = subprocess.run(smc_chart.build_scp_command(host, remote_png, target),
+                                  capture_output=True, text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            return None, "取回图片超时"
+        except OSError as exc:
+            return None, f"无法执行 scp：{exc}"
+        if copy.returncode != 0 or not target.exists():
+            tail = (copy.stderr or "").strip().splitlines()[-4:]
+            return None, "取回图片失败：\n" + "\n".join(tail or ["无输出"])
+        return target, ""
 
     def open_smc_window() -> None:
         """M5/M15/H1/D1 SMC charts for the current contract."""
@@ -1631,21 +1691,53 @@ def run_form() -> int:
             dialog = tk.Toplevel(win)
             dialog.title("SMC 设置")
             dialog.transient(win)
+            dialog.grid_columnconfigure(1, weight=1)
+
+            mode_var = tk.StringVar(value=smc_cfg["mode"])
             script_var = tk.StringVar(value=smc_cfg["script"])
             python_var = tk.StringVar(value=smc_cfg["python"])
+            host_var = tk.StringVar(value=smc_cfg["host"])
+            rpython_var = tk.StringVar(value=smc_cfg["remote_python"])
+            rroot_var = tk.StringVar(value=smc_cfg["remote_root"])
+            rrunner_var = tk.StringVar(value=smc_cfg["remote_runner"])
+            routdir_var = tk.StringVar(value=smc_cfg["remote_outdir"])
             candles_var = tk.StringVar(value=str(smc_cfg["candles"]))
             detect_var = tk.StringVar(value=str(smc_cfg["detect"]))
-            rows = (("渲染脚本", script_var), ("Python 解释器", python_var),
-                    ("K 线数量", candles_var), ("检测长度", detect_var))
-            for row, (label, var) in enumerate(rows):
-                ttk.Label(dialog, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=4)
-                ttk.Entry(dialog, textvariable=var, width=70).grid(row=row, column=1, padx=8, pady=4)
 
-            def browse() -> None:
-                target = filedialog.askopenfilename(parent=dialog, title="选择 smc_comprehensive_chart.py",
-                                                    filetypes=[("Python", "*.py")])
-                if target:
-                    script_var.set(target)
+            def add_row(parent: Any, row: int, label: str, var: Any) -> ttk.Entry:
+                ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=3)
+                entry = ttk.Entry(parent, textvariable=var, width=64)
+                entry.grid(row=row, column=1, sticky="ew", padx=6, pady=3)
+                return entry
+
+            mode_frame = ttk.LabelFrame(dialog, text="生成方式", padding=6)
+            mode_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 4))
+            ttk.Radiobutton(mode_frame, text="本地（Windows 运行脚本）", value="local",
+                            variable=mode_var).pack(side="left", padx=4)
+            ttk.Radiobutton(mode_frame, text="远程（SSH 到 Linux 生成）", value="ssh",
+                            variable=mode_var).pack(side="left", padx=12)
+
+            local = ttk.LabelFrame(dialog, text="本地模式", padding=6)
+            local.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+            local.grid_columnconfigure(1, weight=1)
+            add_row(local, 0, "渲染脚本", script_var)
+            add_row(local, 1, "Python", python_var)
+
+            remote = ttk.LabelFrame(dialog, text="远程模式", padding=6)
+            remote.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+            remote.grid_columnconfigure(1, weight=1)
+            add_row(remote, 0, "SSH 主机", host_var)
+            add_row(remote, 1, "远程 Python", rpython_var)
+            add_row(remote, 2, "远程仓库", rroot_var)
+            add_row(remote, 3, "远程 runner", rrunner_var)
+            add_row(remote, 4, "远程缓存目录", routdir_var)
+
+            common = ttk.Frame(dialog)
+            common.grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=4)
+            ttk.Label(common, text="K 线数量").pack(side="left")
+            ttk.Spinbox(common, textvariable=candles_var, width=8, from_=50, to=2000).pack(side="left", padx=6)
+            ttk.Label(common, text="检测长度").pack(side="left", padx=(12, 0))
+            ttk.Spinbox(common, textvariable=detect_var, width=8, from_=100, to=5000).pack(side="left", padx=6)
 
             def save() -> None:
                 try:
@@ -1654,35 +1746,77 @@ def run_form() -> int:
                 except ValueError:
                     messagebox.showerror("SMC 设置", "K 线数量与检测长度必须是整数", parent=dialog)
                     return
-                smc_cfg.update({"script": script_var.get().strip(),
-                                "python": python_var.get().strip(),
-                                "candles": candles, "detect": detect})
+                smc_cfg.update({
+                    "mode": mode_var.get(),
+                    "script": script_var.get().strip(),
+                    "python": python_var.get().strip(),
+                    "host": host_var.get().strip(),
+                    "remote_python": rpython_var.get().strip(),
+                    "remote_root": rroot_var.get().strip(),
+                    "remote_runner": rrunner_var.get().strip(),
+                    "remote_outdir": routdir_var.get().strip(),
+                    "candles": candles,
+                    "detect": detect,
+                })
                 persist_smc_state()
-                status.set("设置已保存")
+                status.set(f"设置已保存（{'远程 SSH' if mode_var.get() == 'ssh' else '本地'}模式）")
                 dialog.destroy()
                 refresh_view(True)
 
-            ttk.Button(dialog, text="浏览…", command=browse).grid(row=0, column=2, padx=8)
-            ttk.Button(dialog, text="保存", command=save).grid(row=5, column=0, pady=10)
-            ttk.Button(dialog, text="自检", command=lambda: self_check(dialog)).grid(row=5, column=1, sticky="w")
-            ttk.Button(dialog, text="取消", command=dialog.destroy).grid(row=5, column=2, pady=10)
+            buttons = ttk.Frame(dialog)
+            buttons.grid(row=4, column=0, columnspan=2, pady=10)
+            ttk.Button(buttons, text="保存", command=save, width=10).pack(side="left", padx=6)
+            ttk.Button(buttons, text="自检", command=lambda: self_check(dialog), width=10).pack(side="left", padx=6)
+            ttk.Button(buttons, text="取消", command=dialog.destroy, width=10).pack(side="left", padx=6)
 
         def self_check(parent: tk.Toplevel) -> None:
-            python = smc_cfg["python"]
-            script = smc_cfg["script"]
-            lines = []
-            lines.append(("渲染脚本", "✓" if script and Path(script).exists() else "✗",
-                          script or "未设置"))
-            exists = Path(python).exists() if python else False
-            lines.append(("解释器", "✓" if exists else "✗", python or "未设置"))
-            try:
-                proc = subprocess.run([python, "-c", "import akshare, matplotlib, pandas; print('ok')"],
-                                      capture_output=True, text=True, timeout=60)
-                ok = proc.returncode == 0 and "ok" in proc.stdout
-                detail = "依赖齐全" if ok else (proc.stderr.strip().splitlines() or ["导入失败"])[-1]
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                ok, detail = False, str(exc)
-            lines.append(("依赖 akshare/matplotlib/pandas", "✓" if ok else "✗", detail))
+            lines: list[tuple[str, str, str]] = []
+            if smc_cfg["mode"] == "ssh":
+                host = smc_cfg["host"]
+                lines.append(("SSH 主机", "✓" if host else "✗", host or "未设置"))
+                if host:
+                    try:
+                        ping = subprocess.run(
+                            smc_chart.build_ssh_command(host, "echo ok"),
+                            capture_output=True, text=True, timeout=30)
+                        ok = ping.returncode == 0 and "ok" in ping.stdout
+                        detail = "连接正常" if ok else (ping.stderr.strip().splitlines() or ["连接失败"])[-1]
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        ok, detail = False, str(exc)
+                    lines.append(("SSH 连通", "✓" if ok else "✗", detail))
+                    if ok:
+                        try:
+                            probe = subprocess.run(
+                                smc_chart.build_ssh_command(
+                                    host, smc_chart.remote_probe_command(smc_cfg["remote_python"])),
+                                capture_output=True, text=True, timeout=60)
+                            good = probe.returncode == 0 and "ok" in probe.stdout
+                            detail = "依赖齐全" if good else (
+                                (probe.stderr or probe.stdout).strip().splitlines() or ["导入失败"])[-1]
+                        except (OSError, subprocess.TimeoutExpired) as exc:
+                            good, detail = False, str(exc)
+                        lines.append(("远程依赖", "✓" if good else "✗", detail))
+                    runner = smc_cfg["remote_runner"]
+                    if runner:
+                        check = subprocess.run(
+                            smc_chart.build_ssh_command(host, f"test -f {runner} && echo ok"),
+                            capture_output=True, text=True, timeout=30)
+                        lines.append(("远程 runner", "✓" if "ok" in check.stdout else "✗", runner))
+            else:
+                script = smc_cfg["script"]
+                lines.append(("渲染脚本", "✓" if script and Path(script).exists() else "✗",
+                              script or "未设置"))
+                python = smc_cfg["python"]
+                lines.append(("解释器", "✓" if python and Path(python).exists() else "✗",
+                              python or "未设置"))
+                try:
+                    proc = subprocess.run([python, "-c", "import akshare, matplotlib, pandas; print('ok')"],
+                                          capture_output=True, text=True, timeout=60)
+                    ok = proc.returncode == 0 and "ok" in proc.stdout
+                    detail = "依赖齐全" if ok else (proc.stderr.strip().splitlines() or ["导入失败"])[-1]
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    ok, detail = False, str(exc)
+                lines.append(("依赖 akshare/matplotlib/pandas", "✓" if ok else "✗", detail))
             text = "\n".join(f"{mark} {name}：{detail}" for name, mark, detail in lines)
             messagebox.showinfo("SMC 自检", text, parent=parent)
 

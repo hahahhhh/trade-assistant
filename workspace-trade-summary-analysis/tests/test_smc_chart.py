@@ -98,6 +98,31 @@ class CommandTests(unittest.TestCase):
         for minute in ('5', '15', '60'):
             self.assertFalse(sc.is_daily_period(minute))
 
+    def test_remote_command_quotes_paths(self):
+        cmd = sc.remote_runner_command(
+            '/home/coding/quant/bin/python', '/x/runner.py',
+            '/home/coding/trade signal', 'jd2612', '5', ['fvg'], 200, 500, '/tmp/out')
+        self.assertIn("'/home/coding/trade signal'", cmd)
+        self.assertIn('--symbol jd2612', cmd)
+        self.assertIn('--period 5', cmd)
+
+    def test_ssh_command_is_non_interactive(self):
+        cmd = sc.build_ssh_command('myhost', 'echo ok')
+        self.assertEqual(cmd[0], 'ssh')
+        self.assertIn('BatchMode=yes', cmd)
+        self.assertEqual(cmd[-2:], ['myhost', 'echo ok'])
+
+    def test_scp_command_targets_host_path(self):
+        cmd = sc.build_scp_command('myhost', '/tmp/a.png', Path('/local/b.png'))
+        self.assertEqual(cmd[0], 'scp')
+        self.assertIn('myhost:/tmp/a.png', cmd)
+        self.assertEqual(cmd[-1], '/local/b.png')
+
+    def test_probe_command_quotes_python(self):
+        cmd = sc.remote_probe_command('/opt/my python/bin/python')
+        self.assertIn("'/opt/my python/bin/python'", cmd)
+        self.assertIn('akshare', cmd)
+
     def test_script_root(self):
         self.assertEqual(sc.script_root('/home/x/trade-signal/examples/a.py').name, 'trade-signal')
 

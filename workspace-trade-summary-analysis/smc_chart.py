@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -91,6 +92,43 @@ def build_runner_command(python: str, runner: Path, root: Path, symbol: str,
         "--detect", str(int(detect_length)),
         "--outdir", str(outdir),
     ]
+
+
+SSH_OPTIONS = (
+    "-o", "BatchMode=yes",          # never prompt: a GUI subprocess would hang
+    "-o", "ConnectTimeout=10",
+    "-o", "StrictHostKeyChecking=accept-new",
+)
+
+
+def remote_runner_command(remote_python: str, remote_runner: str, remote_root: str,
+                          symbol: str, period: str, indicators: list[str] | tuple[str, ...],
+                          candles: int, detect_length: int, remote_outdir: str) -> str:
+    """One shell command executed on the remote host through ssh."""
+    names = normalize_indicators(indicators)
+    parts = [remote_python, remote_runner,
+             "--root", remote_root,
+             "--symbol", symbol,
+             "--period", str(period),
+             "--indicators", *names,
+             "--candles", str(int(candles)),
+             "--detect", str(int(detect_length)),
+             "--outdir", remote_outdir]
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def remote_probe_command(remote_python: str) -> str:
+    """Remote command used by the self-check to verify the interpreter."""
+    code = "import akshare, matplotlib, pandas; print('ok')"
+    return f"{shlex.quote(remote_python)} -c {shlex.quote(code)}"
+
+
+def build_ssh_command(host: str, remote_command: str) -> list[str]:
+    return ["ssh", *SSH_OPTIONS, host, remote_command]
+
+
+def build_scp_command(host: str, remote_path: str, local_path: Path) -> list[str]:
+    return ["scp", "-q", *SSH_OPTIONS, f"{host}:{remote_path}", str(local_path)]
 
 
 def parse_runner_output(stdout: str) -> dict[str, Any]:
