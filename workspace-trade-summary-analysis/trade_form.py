@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "3.5"
+FORM_VERSION = "3.6"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -107,6 +107,54 @@ def tf_save_equity(equity: float) -> None:
     payload = {"equity_rmb": float(equity),
                "updated_at": datetime.now().isoformat(timespec="seconds")}
     ACCOUNT_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+CACHE_FIELDS = ("variety", "contract", "contract_label", "ask1", "bid1", "last",
+                "ocr_confidence", "ocr_seconds", "source", "ocr_text", "window_title")
+
+
+def update_market_cache(cache: dict[str, Any], variety: str,
+                        market: dict[str, Any]) -> dict[str, Any]:
+    """Remember the latest quote per variety so switching does not re-run OCR."""
+    entry = {key: market.get(key) for key in CACHE_FIELDS if market.get(key) is not None}
+    entry["saved_at"] = datetime.now().isoformat(timespec="seconds")
+    updated = dict(cache)
+    updated[variety] = entry
+    return updated
+
+
+def cached_market(cache: dict[str, Any], variety: str) -> tuple[dict[str, Any] | None, float | None]:
+    """Return (market, age_seconds) for a cached variety, or (None, None)."""
+    entry = cache.get(variety)
+    if not isinstance(entry, dict):
+        return None, None
+    market = {key: value for key, value in entry.items() if key != "saved_at"}
+    if market.get("variety") is None:
+        market["variety"] = variety
+    age = None
+    saved_at = entry.get("saved_at")
+    if saved_at:
+        try:
+            age = max(0.0, (datetime.now() - datetime.fromisoformat(saved_at)).total_seconds())
+        except ValueError:
+            age = None
+    market["from_cache"] = True
+    market["validation"] = {
+        "valid": True,
+        "errors": [],
+        "warnings": ["使用缓存行情，请核对价格是否仍然有效"],
+    }
+    return market, age
+
+
+def age_text(seconds: float | None) -> str:
+    if seconds is None:
+        return "缓存时间未知"
+    if seconds < 60:
+        return f"缓存 {seconds:.0f} 秒前"
+    if seconds < 3600:
+        return f"缓存 {seconds / 60:.0f} 分钟前"
+    return f"缓存 {seconds / 3600:.1f} 小时前"
 
 
 def per_lot_cost(instrument: dict[str, Any]) -> float:
@@ -674,6 +722,7 @@ def run_form() -> int:
         return ttk.Checkbutton(parent, text=text + "    ", variable=variable,
                                command=command, padding=(4, 2, 28, 2))
 
+    market_cache: dict[str, Any] = dict(state.get("market_cache") or {})
     account_equity = tf_account_equity()
     form: dict[str, Any] = {
         "direction": tk.StringVar(value="long"),
@@ -694,6 +743,7 @@ def run_form() -> int:
         "htf_bias": tk.StringVar(value="long"),
         "is_add_on": tk.BooleanVar(value=False),
         "equity": tk.StringVar(value="" if account_equity is None else f"{account_equity:g}"),
+        "variety_pick": tk.StringVar(value=""),
         "tesseract_cmd": tk.StringVar(value=state.get("tesseract_cmd", DEFAULT_TESSERACT)),
         "status": tk.StringVar(value=f"v{FORM_VERSION} 已就绪：点击“刷新行情”读取 WH6，或直接手工填价"),
     }
@@ -1035,7 +1085,20 @@ def run_form() -> int:
     def apply_market(data: dict[str, Any]) -> None:
         nonlocal recognized
         recognized = data
-        recognized["contract_label"] = data.get("contract")
+        recognized["contract_label"] = data.get("contract_label") or data.get("contract")
+        variety = data.get("variety")
+        if variety and data.get("from_cache"):
+            market, age = cached_market(market_cache, variety)
+            if market is not None:
+                data["stale_text"] = age_text(age)
+        elif variety:
+            market_cache.update(update_market_cache(market_cache, variety, data))
+            save_state({**load_state(), "market_cache": market_cache})
+        picker = widgets.get("variety_box")
+        if picker is not None:
+            picker.configure(values=variety_choices())
+        if variety:
+            form["variety_pick"].set(variety)
         header["contract"].set(data.get("contract_label") or data.get("contract") or "?")
         header["ask"].set(str(data.get("ask1", "—")))
         header["bid"].set(str(data.get("bid1", "—")))
@@ -1045,6 +1108,8 @@ def run_form() -> int:
             meta.append(f"置信度 {data['ocr_confidence']:.3f}")
         if data.get("ocr_seconds") is not None:
             meta.append(f"{data['ocr_seconds']}s")
+        if data.get("stale_text"):
+            meta.append(data["stale_text"])
         header["meta"].set(" · ".join(meta) or "手工录入")
         problems = data.get("validation", {}).get("errors", [])
         warnings = data.get("validation", {}).get("warnings", [])
@@ -1075,6 +1140,25 @@ def run_form() -> int:
         sync_budget()
         update_equity_hint()
         fill_prices()
+
+    def variety_choices() -> list[str]:
+        codes = {code for code, inst in config["instruments"].items() if inst.get("configured")}
+        codes |= set(market_cache.keys())
+        if recognized.get("variety"):
+            codes.add(recognized["variety"])
+        return sorted(codes)
+
+    def switch_variety(_event: Any = None) -> None:
+        """Switch the active variety from cache instead of re-running OCR."""
+        variety = form["variety_pick"].get().strip()
+        if not variety:
+            return
+        market, age = cached_market(market_cache, variety)
+        if market is None:
+            form["status"].set(f"{variety} 还没有缓存行情：请在 WH6 切到该合约后按 F5 识别一次")
+            return
+        apply_market(market)
+        form["status"].set(f"已切换到 {variety}（{age_text(age)}，未重新 OCR）")
 
     def refresh() -> None:
         form["status"].set("正在识别 WH6…")
@@ -1546,11 +1630,20 @@ def run_form() -> int:
     widgets["banner"] = banner
     banner.grid_columnconfigure(3, weight=1)
 
+    picker = ttk.Frame(banner)
+    picker.grid(row=0, column=0, sticky="w", padx=(12, 12), pady=10)
+    ttk.Label(picker, text="品种").pack(side="left")
+    variety_box = ttk.Combobox(picker, textvariable=form["variety_pick"], width=6,
+                               state="readonly", values=variety_choices())
+    variety_box.pack(side="left", padx=(4, 0))
+    variety_box.bind("<<ComboboxSelected>>", switch_variety)
+    widgets["variety_box"] = variety_box
+
     ttk.Label(banner, textvariable=header["contract"], style="Contract.TLabel").grid(
-        row=0, column=0, sticky="w", padx=(12, 16), pady=10)
+        row=0, column=1, sticky="w", padx=(0, 16), pady=10)
 
     quote = ttk.Frame(banner)
-    quote.grid(row=0, column=1, sticky="w")
+    quote.grid(row=0, column=2, sticky="w")
     for column, (label, key) in enumerate((("卖一", "ask"), ("买一", "bid"), ("最新", "last"))):
         ttk.Label(quote, text=label, foreground=THEME["muted"]).grid(
             row=0, column=column * 2, sticky="e", padx=(0, 4))
@@ -1779,7 +1872,8 @@ def run_form() -> int:
     def on_close() -> None:
         save_state({"tesseract_cmd": form["tesseract_cmd"].get(),
                     "risk_budget": form["risk_budget"].get(),
-                    "budget_from_limit": bool(form["budget_from_limit"].get())})
+                    "budget_from_limit": bool(form["budget_from_limit"].get()),
+                    "market_cache": market_cache})
         root.destroy()
 
     for key in ("stop_loss", "take_profit"):

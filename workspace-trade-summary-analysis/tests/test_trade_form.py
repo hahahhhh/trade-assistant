@@ -370,6 +370,34 @@ class FormLogicTests(unittest.TestCase):
             finally:
                 tf.ACCOUNT_PATH = original
 
+    def test_market_cache_roundtrip(self):
+        cache = tf.update_market_cache({}, 'V', {
+            'variety': 'V', 'contract': 'V2701', 'ask1': 4903.0,
+            'bid1': 4902.0, 'last': 4903.0, 'ocr_confidence': 0.9,
+        })
+        market, age = tf.cached_market(cache, 'V')
+        self.assertEqual(market['ask1'], 4903.0)
+        self.assertTrue(market['from_cache'])
+        self.assertIsNotNone(age)
+        self.assertIn('缓存', market['validation']['warnings'][0])
+
+    def test_cached_market_missing_variety(self):
+        market, age = tf.cached_market({}, 'RB')
+        self.assertIsNone(market)
+        self.assertIsNone(age)
+
+    def test_market_cache_keeps_varieties_separate(self):
+        cache = tf.update_market_cache({}, 'V', {'variety': 'V', 'ask1': 1.0})
+        cache = tf.update_market_cache(cache, 'RB', {'variety': 'RB', 'ask1': 2.0})
+        self.assertEqual(tf.cached_market(cache, 'V')[0]['ask1'], 1.0)
+        self.assertEqual(tf.cached_market(cache, 'RB')[0]['ask1'], 2.0)
+
+    def test_age_text(self):
+        self.assertEqual(tf.age_text(None), '缓存时间未知')
+        self.assertIn('秒', tf.age_text(30))
+        self.assertIn('分钟', tf.age_text(180))
+        self.assertIn('小时', tf.age_text(7200))
+
     def test_risk_ratio_and_level(self):
         self.assertEqual(tf.risk_ratio(75, 200), 0.375)
         self.assertEqual(tf.risk_ratio(10, 0), 0.0)
