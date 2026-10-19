@@ -36,7 +36,7 @@ RISK_FIELDS = (
     ("slippage_buffer_per_lot", "滑点缓冲/手（元）"),
 )
 DEFAULT_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-FORM_VERSION = "3.1"
+FORM_VERSION = "3.2"
 
 STEP_CHOICES = (1, 5, 10, 20)
 DIRECTIONS = (("买多", "long"), ("卖空", "short"))
@@ -876,7 +876,10 @@ def run_form() -> int:
                 equity_hint.set(f"上限 = ¥{equity:g} × {float(percent):g}% = ¥{limit:g}")
         else:
             limit = instrument.get("single_trade_limit_rmb")
-            equity_hint.set(f"固定金额模式：上限 ¥{float(limit):g}（总资金不参与计算）")
+            if limit is None:
+                equity_hint.set("固定金额模式：尚未设置单笔上限")
+            else:
+                equity_hint.set(f"固定金额模式：上限 ¥{float(limit):g}（总资金不参与计算）")
 
     def on_equity_change(_event: Any = None) -> None:
         """Persist equity, then recompute every limit that depends on it."""
@@ -940,14 +943,15 @@ def run_form() -> int:
             sizing_text.set("1R 计算：该品种尚未启用风险配置")
             return
         stop_ticks = _safe_int(form["stop_ticks"], 30) or 1
-        value_per_tick = float(instrument["value_per_tick"])
         try:
+            value_per_tick = float(instrument["value_per_tick"])
+            limit, _limit_source = effective_limit_for(instrument)
             budget = current_budget()
             sizing = size_by_risk(budget, stop_ticks, value_per_tick, per_lot_cost(instrument))
-        except ValueError as exc:
+        except (ValueError, KeyError, TypeError) as exc:
             sizing_text.set(f"1R 计算：{exc}")
+            apply_text.set("无法套用")
             return
-        limit = float(instrument["single_trade_limit_rmb"])
         suffix = "（= 单笔上限）" if form["budget_from_limit"].get() else ""
         cost = per_lot_cost(instrument)
         cost_part = f"+¥{cost:g} 成本" if cost else ""
